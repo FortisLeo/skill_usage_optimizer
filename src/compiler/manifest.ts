@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { relative, resolve as resolvePath, isAbsolute } from 'node:path';
-import type { DiscoveryContext, NormalizedSkillInput, ReferenceRef, SkillManifest, SkillSection } from '../types.js';
+import type { DiscoveryContext, NormalizedSkillInput, ReferenceRef, SkillConflictDiagnostic, SkillManifest, SkillSection } from '../types.js';
 import { parseMarkdown, type ParsedSection } from '../parser/markdown.js';
 import { extractReferences } from '../retrieval/references.js';
 import { classifyHeading } from './classify.js';
@@ -68,7 +68,12 @@ export function buildSections(input: NormalizedSkillInput, ctx: DiscoveryContext
   });
 }
 
-export function buildManifest(input: NormalizedSkillInput, sections: SkillSection[]): SkillManifest {
+export function buildManifest(
+  input: NormalizedSkillInput,
+  sections: SkillSection[],
+  precedence?: number,
+  conflicts?: SkillConflictDiagnostic[]
+): SkillManifest {
   return {
     id: `${input.system}::${input.skillName}::${input.sourceHash.slice(0, 8)}`,
     skillName: input.skillName,
@@ -88,7 +93,9 @@ export function buildManifest(input: NormalizedSkillInput, sections: SkillSectio
       order: section.order ?? 0
     })),
     tokenCount: sections.reduce((sum, section) => sum + (section.tokenCount ?? countTokens(section.title + '\n' + section.content)), 0),
-    byteLength: sections.reduce((sum, section) => sum + (section.byteLength ?? Buffer.byteLength(section.content, 'utf-8')), 0)
+    byteLength: sections.reduce((sum, section) => sum + (section.byteLength ?? Buffer.byteLength(section.content, 'utf-8')), 0),
+    precedence,
+    conflicts
   };
 }
 

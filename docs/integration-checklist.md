@@ -23,12 +23,18 @@
 - [ ] `load_section` returns exact section content by ID
 - [ ] `resolve_skills` lexical matching returns correct candidates
 - [ ] Token/context selection policy applied during retrieval
+- [ ] Compile conflicts emitted as `CompileResult.diagnostics` (non-fatal), not as `BoundaryError` in `errors`
+- [ ] `SkillConflictDiagnostic` includes winner, shadowed sources, reason, and winner precedence
+- [ ] Compiler picks winner by precedence; tiebreak is deterministic and documented
 
 ### Track C — Store + MCP Tools
 
 - [ ] `list_skills` returns summaries (name, kind, source system, description)
 - [ ] Stale index triggers rebuild or returns rebuild signal
 - [ ] All tools reject unsafe paths (traversal, absolute outside roots)
+- [ ] Store persists `SkillManifest.precedence` and `SkillManifest.conflicts` when present
+- [ ] Store persists `CompileResult.diagnostics` alongside the compiled index
+- [ ] MCP tool responses expose precedence and conflict diagnostics to clients
 
 ## Integration Smoke Tests
 

@@ -1,6 +1,6 @@
 // ponytail: pure MCP tool handlers with injected pipeline functions
 import { readFileSync, statSync } from 'node:fs';
-import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, RetrievalRequest, SkillManifest, SkillStore as TypesSkillStore } from '../types.js';
+import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, RetrievalRequest, SkillConflictDiagnostic, SkillManifest, SkillStore as TypesSkillStore } from '../types.js';
 import type { SkillSection } from '../store/fileStore.js';
 import { computeHash, normalizeContent } from '../fs/freshness.js';
 import { extractMarkdownLinks } from '../retrieval/references.js';
@@ -8,7 +8,7 @@ import { extractMarkdownLinks } from '../retrieval/references.js';
 export interface ToolDeps {
   discover: (ctx: DiscoveryContext) => DiscoverResult;
   normalize: (artifacts: DiscoveredArtifact[], ctx: DiscoveryContext) => NormalizeResult;
-  compile: (inputs: NormalizedSkillInput[], ctx: DiscoveryContext) => { store: TypesSkillStore; errors: BoundaryError[]; manifests?: SkillManifest[] };
+  compile: (inputs: NormalizedSkillInput[], ctx: DiscoveryContext) => { store: TypesSkillStore; errors: BoundaryError[]; manifests?: SkillManifest[]; diagnostics?: SkillConflictDiagnostic[] };
   loadContext: (store: TypesSkillStore, query: string | RetrievalRequest) => RetrievalBundle;
   store: {
     readIndex: () => Promise<Record<string, string>>;
@@ -25,6 +25,15 @@ export interface ToolDeps {
 
 function jsonResult(data: unknown): string {
   return JSON.stringify(data, null, 2);
+}
+
+// Match legacy compiler conflict errors so they never block indexing.
+// Track B now emits SkillConflictDiagnostic, but older compilers and test mocks
+// may still produce errors with this prefix — filter them out when diagnostics exist.
+const CONFLICT_ERROR_PREFIX = 'Skill conflict:';
+
+function isConflictError(e: BoundaryError): boolean {
+  return e.error.startsWith(CONFLICT_ERROR_PREFIX);
 }
 
 function formatErrors(errors: BoundaryError[]): { errors: string[] } {
@@ -110,7 +119,15 @@ export async function handleIndexSkills(
 
   const ci = deps.compile(ni.inputs, ctx);
   if (ci.errors.length > 0) {
-    return jsonResult(formatErrors(ci.errors));
+    if (!ci.diagnostics || ci.diagnostics.length === 0) {
+      // No diagnostics — errors are real compile errors, bail
+      return jsonResult(formatErrors(ci.errors));
+    }
+    // Diagnostics present — filter legacy conflict errors; real errors still bail
+    const nonConflict = ci.errors.filter(e => !isConflictError(e));
+    if (nonConflict.length > 0) {
+      return jsonResult(formatErrors(nonConflict));
+    }
   }
 
   const compiled: Map<string, SkillSection> = ci.store instanceof Map
@@ -158,10 +175,17 @@ export async function handleIndexSkills(
     ? ci.manifests.length
     : new Set([...compiled.values()].map(s => s.manifestId || s.id)).size;
 
+  const conflictCount = ci.diagnostics ? ci.diagnostics.length : 0;
+  const displayErrors = ci.diagnostics && ci.diagnostics.length > 0
+    ? ci.errors.filter(e => !isConflictError(e))
+    : ci.errors;
+
   return jsonResult({
     indexedSkills: manifestCount,
     indexedSections: compiled.size,
-    errors: ci.errors.map(e => `${e.path}: ${e.error}`)
+    errors: displayErrors.map(e => `${e.path}: ${e.error}`),
+    ...(conflictCount > 0 ? { conflictCount } : {}),
+    ...(ci.diagnostics && ci.diagnostics.length > 0 ? { diagnostics: ci.diagnostics } : {})
   });
 }
 
@@ -215,7 +239,9 @@ export async function handleListSkills(
     tokenCount: m.tokenCount,
     byteLength: m.byteLength,
     kind: m.kind ?? null,
-    description: m.description ?? null
+    description: m.description ?? null,
+    precedence: m.precedence,
+    conflictCount: m.conflicts ? m.conflicts.length : 0
   }));
 
   // ponytail: fallback for sections whose manifestId is not covered by any
@@ -287,6 +313,8 @@ export async function handleGetSkillManifest(
       sourceHash: manifest.sourceHash,
       tokenCount: manifest.tokenCount,
       byteLength: manifest.byteLength,
+      precedence: manifest.precedence,
+      conflicts: manifest.conflicts,
       sections: manifest.sections
     });
   }

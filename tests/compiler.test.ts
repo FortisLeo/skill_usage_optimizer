@@ -79,9 +79,10 @@ describe('compile', () => {
   });
 
   it('captures bad input in errors array', () => {
-    const badInput = makeInput({ sourcePath: '/tmp/bad.md' });
-    (badInput as { rawMarkdown?: string }).rawMarkdown = undefined;
-    const result = compile([badInput], makeCtx());
+    const badInput = { ...makeInput({ sourcePath: '/tmp/bad.md' }) };
+    // ponytail: deliberately produce a malformed input — rawMarkdown is required but missing
+    delete (badInput as Partial<NormalizedSkillInput>).rawMarkdown;
+    const result = compile([badInput as NormalizedSkillInput], makeCtx());
     expect(result.errors[0]!.path).toBe('/tmp/bad.md');
     expect(result.store).toBeDefined();
   });
@@ -291,24 +292,45 @@ describe('compile', () => {
       expect(overviewSection).toBeDefined();
       expect(overviewSection!.content).toBe('Higher precedence.');
       expect(result.manifests).toHaveLength(1);
+      expect(result.errors).toEqual([]);
     });
 
-    it('diagnoses each dropped non-winner', () => {
+    it('emits shadowed inputs as diagnostics, not errors', () => {
       const inputs = [
         makeInput({ skillName: 'shared', rawMarkdown: '# A\n\nContent.\n', sourcePath: '/tmp/a.md', precedence: 80 }),
         makeInput({ skillName: 'shared', rawMarkdown: '# A\n\nContent.\n', sourcePath: '/tmp/b.md', precedence: 40 }),
         makeInput({ skillName: 'shared', rawMarkdown: '# A\n\nContent.\n', sourcePath: '/tmp/c.md', precedence: 20 }),
       ];
       const result = compile(inputs, makeCtx());
-      // a.md wins (precedence 80), b.md and c.md are losers
-      const errorPaths = result.errors.map(e => e.path);
-      expect(errorPaths).toContain('/tmp/b.md');
-      expect(errorPaths).toContain('/tmp/c.md');
-      expect(errorPaths).not.toContain('/tmp/a.md');
-      for (const err of result.errors) {
-        expect(err.error).toContain('conflict');
-        expect(err.error).toContain('winner at /tmp/a.md');
-      }
+      expect(result.errors).toEqual([]);
+      expect(result.diagnostics).toBeDefined();
+      expect(result.diagnostics!.length).toBeGreaterThanOrEqual(1);
+      // Only one diagnostic per conflict group
+      expect(result.diagnostics!.length).toBe(1);
+      const d = result.diagnostics![0]!;
+      expect(d.conflictKey).toBe('claude::shared');
+      expect(d.winnerPrecedence).toBe(80);
+      expect(d.winner).toMatchObject({ system: 'claude', sourcePath: '/tmp/a.md' });
+      expect(d.shadowed).toHaveLength(2);
+      const shadowedPaths = d.shadowed.map(s => s.sourcePath).sort();
+      expect(shadowedPaths).toEqual(['/tmp/b.md', '/tmp/c.md']);
+      expect(d.reason).toBe('higher_precedence');
+    });
+
+    it('attaches precedence and conflicts to winner manifest', () => {
+      const inputs = [
+        makeInput({ skillName: 'attach', rawMarkdown: '# X\n\nWinner.\n', sourcePath: '/tmp/win.md', precedence: 90 }),
+        makeInput({ skillName: 'attach', rawMarkdown: '# X\n\nLoser.\n', sourcePath: '/tmp/lose.md', precedence: 30 }),
+      ];
+      const result = compile(inputs, makeCtx());
+      expect(result.manifests).toHaveLength(1);
+      const m = result.manifests![0]!;
+      expect(m.precedence).toBe(90);
+      expect(m.conflicts).toBeDefined();
+      expect(m.conflicts).toHaveLength(1);
+      expect(m.conflicts![0]!.conflictKey).toBe('claude::attach');
+      expect(m.conflicts![0]!.winner.sourcePath).toBe('/tmp/win.md');
+      expect(m.conflicts![0]!.shadowed).toHaveLength(1);
     });
 
     it('produces deterministic output independent of input order', () => {
@@ -324,6 +346,8 @@ describe('compile', () => {
       expect([...r1.store.keys()].sort()).toEqual([...r2.store.keys()].sort());
       expect(r1.manifests!.length).toBe(3);
       expect(r2.manifests!.length).toBe(3);
+      expect(r1.errors).toEqual([]);
+      expect(r2.errors).toEqual([]);
     });
 
     it('tiebreaks same precedence by sourcePath ascending', () => {
@@ -333,6 +357,58 @@ describe('compile', () => {
       ];
       const result = compile(inputs, makeCtx());
       expect([...result.store.values()].find(s => s.title === 'X')!.content).toBe('First.');
+      expect(result.errors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics![0]!.reason).toBe('same_precedence_tiebreak');
+      expect(result.diagnostics![0]!.winner.sourcePath).toBe('/tmp/a.md');
+    });
+
+    it('tiebreaks same precedence and same sourcePath by sourceHash ascending', () => {
+      const inputs = [
+        makeInput({ skillName: 'hash-tie', rawMarkdown: '# H\n\nHash-B.\n', sourcePath: '/tmp/shared.md', sourceHash: 'bbb222', precedence: 80 }),
+        makeInput({ skillName: 'hash-tie', rawMarkdown: '# H\n\nHash-A.\n', sourcePath: '/tmp/shared.md', sourceHash: 'aaa111', precedence: 80 }),
+      ];
+      const result = compile(inputs, makeCtx());
+      expect([...result.store.values()].find(s => s.title === 'H')!.content).toBe('Hash-A.');
+      expect(result.errors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics![0]!.reason).toBe('same_precedence_tiebreak');
+      expect(result.diagnostics![0]!.winner.sourceHash).toBe('aaa111');
+    });
+
+    it('same skillName different system both compile (no conflict)', () => {
+      const inputs = [
+        makeInput({ system: 'claude', skillName: 'shared', rawMarkdown: '# C\n\nClaude.\n', sourcePath: '/tmp/claude.md', precedence: 80 }),
+        makeInput({ system: 'opencode', skillName: 'shared', rawMarkdown: '# O\n\nOpencode.\n', sourcePath: '/tmp/open.md', precedence: 50 }),
+      ];
+      const result = compile(inputs, makeCtx());
+      expect(result.manifests).toHaveLength(2);
+      expect(result.errors).toEqual([]);
+      expect(result.diagnostics).toEqual([]);
+      expect(result.store.size).toBe(2);
+    });
+
+    it('no diagnostics or errors for single input (no conflict possible)', () => {
+      const result = compile([makeInput({ skillName: 'solo' })], makeCtx());
+      expect(result.errors).toEqual([]);
+      expect(result.diagnostics).toEqual([]);
+      expect(result.manifests).toHaveLength(1);
+    });
+
+    it('only shadowed inputs are excluded from store, not winners', () => {
+      const inputs = [
+        makeInput({ skillName: 'part', rawMarkdown: '# P\n\nWin.\n', sourcePath: '/tmp/win.md', precedence: 100 }),
+        makeInput({ skillName: 'part', rawMarkdown: '# P\n\nShadow.\n', sourcePath: '/tmp/shadow.md', precedence: 30 }),
+        makeInput({ skillName: 'other', rawMarkdown: '# O\n\nOther.\n', sourcePath: '/tmp/other.md', precedence: 50 }),
+      ];
+      const result = compile(inputs, makeCtx());
+      // 'other' is a different skillName so it compiles; 'part' only winner compiles
+      expect(result.store.size).toBe(2);
+      expect([...result.store.values()].map(s => s.content)).toContain('Win.');
+      expect([...result.store.values()].map(s => s.content)).toContain('Other.');
+      expect(result.manifests).toHaveLength(2);
+      expect(result.errors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
     });
   });
 });

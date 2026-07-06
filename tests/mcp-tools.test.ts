@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, SkillManifest } from '../src/types.js';
+import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, SkillConflictDiagnostic, SkillManifest } from '../src/types.js';
 import type { SkillSection, SkillStore } from '../src/store/fileStore.js';
 import { computeHash } from '../src/fs/freshness.js';
 import type { ToolDeps } from '../src/mcp/tools.js';
@@ -314,6 +314,109 @@ describe('handleIndexSkills', () => {
     expect(list.skills).toEqual([]);
     expect(list.count).toBe(0);
   });
+
+  it('returns conflictCount and diagnostics from compiler result', async () => {
+    const section = makeSection('skill-a', '# A', 'hA');
+    const diagnostics: SkillConflictDiagnostic[] = [{
+      conflictKey: 'claude::skill-shared',
+      winner: { system: 'claude', sourcePath: '/tmp/winner.md', sourceHash: 'abc' },
+      shadowed: [{ system: 'opencode', sourcePath: '/tmp/loser.md', sourceHash: 'def' }],
+      reason: 'higher_precedence',
+      winnerPrecedence: 80
+    }];
+    const deps = makeStubDeps({
+      compile: () => {
+        const store = new Map<string, SkillSection>();
+        store.set('skill-a', section);
+        return { store, errors: [], diagnostics };
+      }
+    });
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.indexedSkills).toBe(1);
+    expect(parsed.conflictCount).toBe(1);
+    expect(parsed.diagnostics).toBeDefined();
+    expect(parsed.diagnostics[0].conflictKey).toBe('claude::skill-shared');
+    expect(parsed.diagnostics[0].reason).toBe('higher_precedence');
+  });
+
+  it('diagnostics-only — indexing succeeds with conflict info', async () => {
+    const section = makeSection('skill-a', '# A', 'hA');
+    const diagnostics: SkillConflictDiagnostic[] = [{
+      conflictKey: 'claude::skill-shared',
+      winner: { system: 'claude', sourcePath: '/tmp/winner.md', sourceHash: 'abc' },
+      shadowed: [{ system: 'opencode', sourcePath: '/tmp/loser.md', sourceHash: 'def' }],
+      reason: 'higher_precedence',
+      winnerPrecedence: 80
+    }];
+    const deps = makeStubDeps({
+      compile: () => {
+        const store = new Map<string, SkillSection>();
+        store.set('skill-a', section);
+        return { store, errors: [], diagnostics };
+      }
+    });
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.indexedSkills).toBe(1);
+    expect(parsed.conflictCount).toBe(1);
+    expect(parsed.diagnostics).toBeDefined();
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it('errors-only — bails with formatted errors', async () => {
+    const deps = makeStubDeps({
+      compile: () => ({ store: new Map(), errors: [{ path: '/tmp/parse.md', error: 'Failed to parse markdown' }] })
+    });
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.errors).toBeDefined();
+    expect(parsed.errors).toEqual(['/tmp/parse.md: Failed to parse markdown']);
+    expect(parsed.indexedSkills).toBeUndefined();
+  });
+
+  it('diagnostics + unrelated error — bails on non-conflict error', async () => {
+    const deps = makeStubDeps({
+      compile: () => ({
+        store: new Map(),
+        errors: [{ path: '/tmp/broken.md', error: 'Failed to parse markdown' }],
+        diagnostics: [{ conflictKey: 'k', winner: { system: 'claude', sourcePath: '/w.md', sourceHash: 'h' }, shadowed: [], reason: 'higher_precedence', winnerPrecedence: 80 }]
+      })
+    });
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.errors).toEqual(['/tmp/broken.md: Failed to parse markdown']);
+    expect(parsed.indexedSkills).toBeUndefined();
+    expect(parsed.conflictCount).toBeUndefined();
+  });
+
+  it('diagnostics + legacy conflict error — conflict error is non-fatal', async () => {
+    const section = makeSection('skill-a', '# A', 'hA');
+    const diagnostics: SkillConflictDiagnostic[] = [{
+      conflictKey: 'claude::shared',
+      winner: { system: 'claude', sourcePath: '/w.md', sourceHash: 'h' },
+      shadowed: [{ system: 'opencode', sourcePath: '/l.md', sourceHash: 'l' }],
+      reason: 'higher_precedence',
+      winnerPrecedence: 80
+    }];
+    const deps = makeStubDeps({
+      compile: () => ({
+        store: new Map([['skill-a', section]]),
+        errors: [{ path: '/tmp/loser.md', error: 'Skill conflict: \'opencode::shared\' dropped (precedence 60 < 80); winner at /tmp/winner.md' }],
+        diagnostics
+      })
+    });
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.indexedSkills).toBe(1);
+    expect(parsed.conflictCount).toBe(1);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.diagnostics).toBeDefined();
+  });
+
+  it('omits conflictCount when no diagnostics', async () => {
+    const deps = makeStubDeps({
+      compile: () => ({ store: new Map(), errors: [] })
+    });
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.conflictCount).toBeUndefined();
+    expect(parsed.diagnostics).toBeUndefined();
+  });
 });
 
 describe('handleListSkills', () => {
@@ -607,6 +710,47 @@ describe('handleListSkills', () => {
       expect(skill).toHaveProperty('kind');
       expect(skill).toHaveProperty('description');
     }
+  });
+
+  it('includes precedence and conflictCount from manifest', async () => {
+    const diagnostics: SkillConflictDiagnostic[] = [{
+      conflictKey: 'claude::shared-name',
+      winner: { system: 'claude', sourcePath: '/tmp/winner.md', sourceHash: 'abc' },
+      shadowed: [{ system: 'opencode', sourcePath: '/tmp/loser.md', sourceHash: 'def' }],
+      reason: 'higher_precedence',
+      winnerPrecedence: 80
+    }];
+    const manifest: SkillManifest = {
+      id: 'conflict-skill', skillName: 'conflict-skill', system: 'claude',
+      sourcePath: '/tmp/skill.md', sourceHash: 'abc',
+      sections: [{ id: 'conflict-skill::overview', title: 'Overview', class: 'always', tokenCount: 2, byteLength: 8, references: [], order: 0 }],
+      tokenCount: 2, byteLength: 8,
+      precedence: 80,
+      conflicts: diagnostics
+    };
+    const section = makeSection('conflict-skill::overview', '# Hello', 'h1', 'claude', 'conflict-skill');
+    const deps = makeStubDeps({
+      store: makeStoreDeps({ 'conflict-skill::overview': 'h1' }, [section], { 'conflict-skill': manifest })
+    });
+    const parsed = JSON.parse(await handleListSkills(deps));
+    expect(parsed.skills[0].precedence).toBe(80);
+    expect(parsed.skills[0].conflictCount).toBe(1);
+  });
+
+  it('precedence is undefined and conflictCount is 0 when manifest has no conflict fields', async () => {
+    const manifest: SkillManifest = {
+      id: 'clean-skill', skillName: 'clean-skill', system: 'claude',
+      sourcePath: '/tmp/skill.md', sourceHash: 'abc',
+      sections: [{ id: 'clean-skill::overview', title: 'Overview', class: 'always', tokenCount: 2, byteLength: 8, references: [], order: 0 }],
+      tokenCount: 2, byteLength: 8
+    };
+    const section = makeSection('clean-skill::overview', '# Hello', 'h1', 'claude', 'clean-skill');
+    const deps = makeStubDeps({
+      store: makeStoreDeps({ 'clean-skill::overview': 'h1' }, [section], { 'clean-skill': manifest })
+    });
+    const parsed = JSON.parse(await handleListSkills(deps));
+    expect(parsed.skills[0].precedence).toBeUndefined();
+    expect(parsed.skills[0].conflictCount).toBe(0);
   });
 });
 
@@ -918,6 +1062,62 @@ describe('handleGetSkillManifest', () => {
     expect(list.skills.map((s: { id: string }) => s.id).sort()).toEqual(['claude::shared::aaa11111', 'opencode::shared::bbb22222']);
     expect(list.count).toBe(2);
   });
+
+  it('returns precedence and conflicts from persisted manifest', async () => {
+    const diagnostics: SkillConflictDiagnostic[] = [{
+      conflictKey: 'claude::shared',
+      winner: { system: 'claude', sourcePath: '/tmp/winner.md', sourceHash: 'abc' },
+      shadowed: [{ system: 'opencode', sourcePath: '/tmp/loser.md', sourceHash: 'def' }],
+      reason: 'higher_precedence',
+      winnerPrecedence: 80
+    }];
+    const manifest: SkillManifest = {
+      id: 'conflict-skill',
+      skillName: 'conflict-skill',
+      system: 'claude',
+      sourcePath: '/tmp/skill.md',
+      sourceHash: 'abcdef',
+      sections: [{ id: 'conflict-skill::overview', title: 'Overview', class: 'always', tokenCount: 2, byteLength: 8, references: [], order: 0 }],
+      tokenCount: 2,
+      byteLength: 8,
+      precedence: 80,
+      conflicts: diagnostics
+    };
+    const section = makeSection('conflict-skill::overview', '# Hello', 'h1', 'claude', 'conflict-skill');
+    const deps = makeStubDeps({
+      store: makeStoreDeps({ 'conflict-skill::overview': 'h1' }, [section], { 'conflict-skill': manifest })
+    });
+    const parsed = JSON.parse(await handleGetSkillManifest(deps, 'conflict-skill'));
+    expect(parsed.exists).toBe(true);
+    expect(parsed.precedence).toBe(80);
+    expect(parsed.conflicts).toBeDefined();
+    expect(parsed.conflicts).toHaveLength(1);
+    expect(parsed.conflicts[0].conflictKey).toBe('claude::shared');
+    expect(parsed.conflicts[0].reason).toBe('higher_precedence');
+    expect(parsed.conflicts[0].winnerPrecedence).toBe(80);
+    expect(parsed.conflicts[0].shadowed).toHaveLength(1);
+  });
+
+  it('precedence is undefined and conflicts is undefined when manifest lacks them', async () => {
+    const manifest: SkillManifest = {
+      id: 'clean-skill',
+      skillName: 'clean-skill',
+      system: 'claude',
+      sourcePath: '/tmp/skill.md',
+      sourceHash: 'abcdef',
+      sections: [{ id: 'clean-skill::overview', title: 'Overview', class: 'always', tokenCount: 2, byteLength: 8, references: [], order: 0 }],
+      tokenCount: 2,
+      byteLength: 8
+    };
+    const section = makeSection('clean-skill::overview', '# Hello', 'h1', 'claude', 'clean-skill');
+    const deps = makeStubDeps({
+      store: makeStoreDeps({ 'clean-skill::overview': 'h1' }, [section], { 'clean-skill': manifest })
+    });
+    const parsed = JSON.parse(await handleGetSkillManifest(deps, 'clean-skill'));
+    expect(parsed.exists).toBe(true);
+    expect(parsed.precedence).toBeUndefined();
+    expect(parsed.conflicts).toBeUndefined();
+  });
 });
 
 describe('handleGetSkillSections', () => {
@@ -1056,9 +1256,14 @@ describe('handleLoadSkillContext', () => {
 
   it('reports invalid bundle', async () => {
     const section = makeSection('skill-1', '# Hello', 'h1');
+    // ponytail: construct an invalid bundle to test runtime validation without any-typed casts
+    function makeBadBundle(): RetrievalBundle {
+      const bad = { sections: null, context: null };
+      return bad as unknown as RetrievalBundle;
+    }
     const deps = makeStubDeps({
       store: makeStoreDeps({ 'skill-1': 'h1' }, [section]),
-      loadContext: () => ({ sections: null as any, context: null as any })
+      loadContext: () => makeBadBundle()
     });
     const result = await handleLoadSkillContext(deps, 'test');
     const parsed = JSON.parse(result);

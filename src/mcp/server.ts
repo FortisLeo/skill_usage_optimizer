@@ -126,7 +126,8 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
       return {
         store: result.store instanceof Map ? result.store : new Map(Object.entries(result.store)),
         errors: result.errors,
-        manifests: result.manifests
+        manifests: result.manifests,
+        diagnostics: result.diagnostics
       };
     },
     loadContext,

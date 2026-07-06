@@ -1,0 +1,124 @@
+# Ruleloom
+
+> Policy-first context compiler for coding agents. MCP server.
+
+## Summary
+
+Ruleloom is an MCP server that discovers `SKILL.md`, `AGENTS.md`, Copilot instructions, and other harness rule files, normalizes them, compiles them into manifests and sections, and returns minimal policy-first context for a query. The design is a deterministic compiler with a BM25-lite fallback, not a RAG system.
+
+## Project
+
+- Name: Ruleloom (Skill Compiler MCP)
+- Repository: this repo
+- Server name (over MCP): `skill-usage-optimizer`
+- Transport: stdio JSON-RPC 2.0
+- Capabilities: `tools`
+- Build: `npm install && npm run build` produces `dist/index.js`
+- Run: `node dist/index.js` (or `npm start`)
+
+## Doc index
+
+- [README.md](README.md): overview, quick start, host matrix, citations.
+- [docs/installation.md](docs/installation.md): MCP config for Claude Code, Claude Desktop, Codex, OpenCode, VS Code, Cursor. Windows `cmd /c npx` pattern.
+- [docs/tool-reference.md](docs/tool-reference.md): exact tool names, schemas, input examples, response shapes, error envelopes.
+- [docs/agent-guide.md](docs/agent-guide.md): bootstrap sequence, when to index, when to load, how to handle `rebuildRequired`, how to read conflict diagnostics.
+- [docs/troubleshooting.md](docs/troubleshooting.md): not discovered, stale index, empty cache, Windows npx, permissions, token budget, wrong rule loaded, build failures.
+- [docs/examples.md](docs/examples.md): ten end-to-end flows including multi-system indexing, conflict diagnosis, budget tuning, and empty-repo behavior.
+
+## MCP tools
+
+Six tools, all over stdio JSON-RPC. Names are stable, snake_case, exact-match.
+
+| Name | Purpose | Arguments |
+| --- | --- | --- |
+| `index_skills` | Discover, normalize, and compile rule files for one system into the cache. | `system` (required: claude \| opencode \| codex \| copilot), `roots`, `baseDir`, `force` |
+| `list_skills` | Enumerate indexed skills with section/token/conflict counts. | `system` (optional filter) |
+| `get_skill_manifest` | Read one skill's compiled manifest. | `skillId` (required) |
+| `get_skill_sections` | Read one skill's sections with full content. | `skillId` (required) |
+| `load_skill_context` | Retrieve minimal, policy-first context for a query. | `query`, `phase`, `includeReferences`, `maxBytes` |
+| `load_section` | Load exactly one section plus its references. | `sectionId` (required) |
+
+## Source systems
+
+The `system` argument (where accepted) is one of:
+
+- `claude`: `.claude/skills/`, `.claude/commands/`
+- `opencode`: `.opencode/skills/`, `.opencode/rules/`, `~/.config/opencode/skills/`
+- `codex`: `.codex/skills/`, `.codex/agents/`, `/etc/codex/skills/`
+- `copilot`: `.github/copilot/`, `.github/instructions/`
+
+Rule file entry names: `SKILL.md`, `skill.md`, `instructions.md`, `rules.md`. Anything else is not picked up unless passed via `roots`.
+
+## Cache layout
+
+Default location: `<cwd>/.skill-cache/`. Override via `McpServerOptions.storeDir` when embedding programmatically.
+
+```
+.skill-cache/
+  index.json          # sectionId -> content hash
+  manifests.json      # skillId -> SkillManifest
+  sections/           # one JSON file per section, base64url(id).json
+```
+
+Writes are atomic (temp + rename). Treat the directory as Ruleloom's.
+
+## Section classes
+
+- `always`: included on every load, even over budget.
+- `phase`: included when the matching `phase` argument is set.
+- `on_demand`: included only when the query explicitly matches.
+- `reference`: included only when `includeReferences: true` and the section is reachable from a `file` or `url` reference.
+
+## Common response shapes
+
+- Error: `{ "errors": ["..."] }` with `isError: true` on the MCP response.
+- Stale index: `{ "errors": [...], "rebuildRequired": { "code": "REBUILD_REQUIRED", "action": "index_skills", "sectionIds": [...], "manifestIds": [...], "reason": "source_changed" } }`.
+- Conflict diagnostic: `{ "conflictKey", "winner", "shadowed", "reason", "winnerPrecedence" }` where `reason` is `higher_precedence` or `same_precedence_tiebreak`.
+
+## Precedence order (highest to lowest)
+
+1. `workspace_repo`: rule files inside the project's repo root (precedence 100).
+2. `workspace_root`: rule files at the workspace root (80).
+3. `explicit`: roots passed to `index_skills` (70).
+4. `global`: rule files under `~/.claude/`, `~/.config/opencode/`, `~/.codex/` (40).
+5. `system`: rule files under `/etc/codex/skills/` and similar (10).
+
+The winner of a conflict is the source with the highest precedence. Ties resolve deterministically by source path.
+
+## Supported hosts
+
+- Claude Code (CLI): project `.mcp.json` or user config.
+- Claude Desktop: `claude_desktop_config.json`.
+- Codex CLI: `~/.codex/config.toml` `mcp_servers` table.
+- OpenCode: `opencode.json` `mcp` block.
+- VS Code + Copilot: `mcp.json` with `servers` block.
+- Cursor: `.cursor/mcp.json`.
+- Generic MCP: any stdio MCP host.
+
+## Build and verify
+
+```sh
+npm install
+npm run build
+node dist/index.js        # silent; awaiting JSON-RPC on stdin
+npm test                  # vitest
+npm run typecheck         # tsc --noEmit
+```
+
+Smoke test from an agent:
+
+```json
+{ "name": "list_skills", "arguments": {} }
+```
+
+Expected on a fresh install: `{ "skills": [], "count": 0 }`.
+
+## Inspiration
+
+- GitNexus: https://github.com/abhigyanpatwari/GitNexus
+- Superpowers: https://github.com/obra/superpowers
+- MCP reference servers: https://github.com/modelcontextprotocol/servers
+
+## Status
+
+The MCP server, compile pipeline, retrieval layer, and on-disk store are implemented and tested. The package is not on the npm registry yet. Build from source and point your harness at `dist/index.js`. Replace `<package-name>` placeholders with the published name once a release is cut.

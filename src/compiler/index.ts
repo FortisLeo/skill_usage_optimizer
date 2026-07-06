@@ -1,10 +1,15 @@
-import type { BoundaryError, CompileResult, DiscoveryContext, NormalizedSkillInput, SkillManifest, SkillSection } from '../types.js';
+import type { BoundaryError, CompileResult, DiscoveryContext, NormalizedSkillInput, SkillConflictDiagnostic, SkillManifest, SkillSection, SkillSourceRef } from '../types.js';
 import { buildManifest, buildSections } from './manifest.js';
+
+function toSourceRef(input: NormalizedSkillInput): SkillSourceRef {
+  return { system: input.system, sourcePath: input.sourcePath, sourceHash: input.sourceHash };
+}
 
 export function compile(inputs: NormalizedSkillInput[], ctx: DiscoveryContext): CompileResult {
   const store = new Map<string, SkillSection>();
   const errors: BoundaryError[] = [];
   const manifests: SkillManifest[] = [];
+  const diagnostics: SkillConflictDiagnostic[] = [];
   // ponytail: global collision tracking across all inputs
   const seenIds = new Map<string, number>();
 
@@ -28,11 +33,21 @@ export function compile(inputs: NormalizedSkillInput[], ctx: DiscoveryContext): 
     const winner = sorted[0]!;
     winners.push(winner);
 
-    for (let i = 1; i < sorted.length; i++) {
-      const loser = sorted[i]!;
-      errors.push({
-        path: loser.sourcePath,
-        error: `Skill conflict: '${loser.system}::${loser.skillName}' dropped (precedence ${loser.precedence} < ${winner.precedence}); winner at ${winner.sourcePath}`
+    if (sorted.length > 1) {
+      const conflictKey = `${winner.system}::${winner.skillName}`;
+      const shadowed = sorted.slice(1).map(toSourceRef);
+      // Determine reason: all shadowed have same or lower precedence than winner
+      // check if any shadowed had same precedence as winner (tiebreak)
+      const samePrec = shadowed.some(s => {
+        const inp = sorted.slice(1).find(i => i.sourcePath === s.sourcePath && i.sourceHash === s.sourceHash);
+        return inp?.precedence === winner.precedence;
+      });
+      diagnostics.push({
+        conflictKey,
+        winner: toSourceRef(winner),
+        shadowed,
+        reason: samePrec ? 'same_precedence_tiebreak' : 'higher_precedence',
+        winnerPrecedence: winner.precedence
       });
     }
   }
@@ -45,15 +60,29 @@ export function compile(inputs: NormalizedSkillInput[], ctx: DiscoveryContext): 
     a.sourceHash.localeCompare(b.sourceHash)
   );
 
+  // Build a lookup of winner -> diagnostics for manifest attachment
+  const winnerDiags = new Map<NormalizedSkillInput, SkillConflictDiagnostic[]>();
+  for (const d of diagnostics) {
+    const winner = winners.find(w =>
+      w.sourcePath === d.winner.sourcePath &&
+      w.sourceHash === d.winner.sourceHash
+    );
+    if (winner) {
+      const list = winnerDiags.get(winner);
+      if (list) list.push(d);
+      else winnerDiags.set(winner, [d]);
+    }
+  }
+
   for (const input of winners) {
     try {
       const sections = buildSections(input, ctx, seenIds);
       for (const section of sections) store.set(section.id, section);
-      manifests.push(buildManifest(input, sections));
+      manifests.push(buildManifest(input, sections, input.precedence, winnerDiags.get(input)));
     } catch (err) {
       errors.push({ path: input.sourcePath, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
-  return { store, manifests, errors };
+  return { store, manifests, errors, diagnostics };
 }

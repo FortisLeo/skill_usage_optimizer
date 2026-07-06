@@ -150,6 +150,7 @@ export interface SkillSection {
   tokenCount?: number;
   byteLength?: number;
   order?: number;
+  precedence?: number;
 }
 
 export type SkillStore = Map<string, SkillSection> | Record<string, SkillSection>;
@@ -166,4 +167,5 @@ export interface CompileResult {
   store: SkillStore;
   errors: BoundaryError[];
   manifests?: SkillManifest[];
+  diagnostics?: SkillConflictDiagnostic[];
 }

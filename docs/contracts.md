@@ -55,6 +55,20 @@ export interface NormalizedSkillInput {
   size: number;
   precedence: number;
 }
+
+export interface SkillSourceRef {
+  system: SourceSystem;
+  sourcePath: string;
+  sourceHash: string;
+}
+
+export interface SkillConflictDiagnostic {
+  conflictKey: string;
+  winner: SkillSourceRef;
+  shadowed: SkillSourceRef[];
+  reason: 'higher_precedence' | 'same_precedence_tiebreak';
+  winnerPrecedence: number;
+}
 ```
 
 ## Module API Boundaries
@@ -94,6 +108,19 @@ export interface SkillSection {
   title: string;
   content: string;
   hash: string;
+  system?: SourceSystem;
+  sourcePath?: string;
+  sourceHash?: string;
+  mtimeMs?: number;
+  size?: number;
+  manifestId?: string;
+  class?: SectionClass;
+  policy?: MandatoryPolicy;
+  references?: ReferenceRef[];
+  tokenCount?: number;
+  byteLength?: number;
+  order?: number;
+  precedence?: number;
 }
 
 export type SkillStore = Map<string, SkillSection> | Record<string, SkillSection>;
@@ -143,11 +170,15 @@ export interface SkillManifest {
   id: string;
   skillName: string;
   system: SourceSystem;
+  kind: ArtifactKind;
+  description: string | null;
   sourcePath: string;
   sourceHash: string;
   sections: ManifestSectionRef[];
   tokenCount: number;
   byteLength: number;
+  precedence?: number;
+  conflicts?: SkillConflictDiagnostic[];
 }
 
 export interface RetrievalBundle {
@@ -192,6 +223,7 @@ export interface CompileResult {
   store: SkillStore;
   errors: BoundaryError[];
   manifests?: SkillManifest[];
+  diagnostics?: SkillConflictDiagnostic[];
 }
 ```
 
@@ -202,6 +234,25 @@ export interface CompileResult {
 - Uncaught throws across a module boundary are a contract violation. Each
   module wraps its top-level entry point in a try/catch that converts
   unexpected errors into a `{ path: '<track>', error: string }` entry.
+
+## Compile Conflicts Are Non-Fatal Diagnostics
+
+When the compiler detects precedence conflicts between skill sources (e.g.,
+two systems define the same skill name, or sections collide), these are
+reported as `SkillConflictDiagnostic` entries in `CompileResult.diagnostics`,
+**not** as `BoundaryError` entries in `CompileResult.errors`.
+
+- A conflict does not prevent compilation; the compiler picks a winner by
+  precedence (or deterministic tiebreak) and records the decision.
+- `errors` remains reserved for hard failures (unreadable files, parse
+  errors, unsafe paths).
+- Consumers that need to surface conflicts to users read `diagnostics`, not
+  `errors`.
+
+**Migration responsibility (Track B):** If the current runtime still emits
+conflicts as `BoundaryError` entries in `errors`, Track B must migrate
+conflict reporting to `diagnostics` before claiming contract compliance.
+This contract defines the target state; runtime parity is a Track B deliverable.
 
 ## Freezing Rules
 

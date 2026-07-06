@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileStore, SkillSection } from '../src/store/fileStore.js';
 import type { ToolDeps } from '../src/mcp/tools.js';
+import type { SkillConflictDiagnostic, SkillManifest } from '../src/types.js';
 import {
   handleIndexSkills,
   handleListSkills,
@@ -170,5 +171,66 @@ describe('integration: FileStore + tool handlers', () => {
     const sec = JSON.parse(await handleLoadSection(deps, 'integ-test::overview'));
     expect(sec.section.id).toBe('integ-test::overview');
     expect(sec.section.content).toContain('Integration test overview');
+  });
+
+  it('conflict round-trip: index with diagnostics → list shows conflictCount → get shows conflicts', async () => {
+    const diagnostics: SkillConflictDiagnostic[] = [{
+      conflictKey: 'claude::shared-skill',
+      winner: { system: 'claude', sourcePath: join(dir, 'winner.md'), sourceHash: 'abc' },
+      shadowed: [{ system: 'opencode', sourcePath: join(dir, 'loser.md'), sourceHash: 'def' }],
+      reason: 'higher_precedence',
+      winnerPrecedence: 85
+    }];
+    const manifest: SkillManifest = {
+      id: 'claude::conflict::aaa11111',
+      skillName: 'conflict-skill',
+      system: 'claude',
+      kind: 'skill_package',
+      description: null,
+      sourcePath: join(dir, 'winner.md'),
+      sourceHash: 'abc',
+      sections: [{ id: 'claude::conflict::aaa11111::overview', title: 'Overview', class: 'always', tokenCount: 2, byteLength: 8, references: [], order: 0 }],
+      tokenCount: 2,
+      byteLength: 8,
+      precedence: 85,
+      conflicts: diagnostics
+    };
+    const section: SkillSection = withSource({
+      id: 'claude::conflict::aaa11111::overview',
+      title: 'Overview',
+      content: '# Overview\nConflict skill.',
+      hash: 'h1',
+      manifestId: 'claude::conflict::aaa11111'
+    }, dir);
+    const m = new Map<string, SkillSection>();
+    m.set('claude::conflict::aaa11111::overview', section);
+    await fileStore.writeSections(m);
+    await fileStore.writeIndex({ 'claude::conflict::aaa11111::overview': 'h1' });
+    await fileStore.writeManifests({ 'claude::conflict::aaa11111': manifest });
+
+    const deps: ToolDeps = {
+      discover: () => ({ artifacts: [], errors: [] }),
+      normalize: () => ({ inputs: [], errors: [] }),
+      compile: () => ({ store: new Map(), errors: [] }),
+      loadContext: () => ({ sections: [], context: '' }),
+      store: fileStore,
+      resolveHomeDir: () => '/fake/home',
+      resolveWorkspaceRoot: () => '/fake/ws'
+    };
+
+    // 1. list_skills shows precedence and conflictCount
+    const list = JSON.parse(await handleListSkills(deps));
+    expect(list.count).toBe(1);
+    expect(list.skills[0].id).toBe('claude::conflict::aaa11111');
+    expect(list.skills[0].precedence).toBe(85);
+    expect(list.skills[0].conflictCount).toBe(1);
+
+    // 2. get_skill_manifest shows precedence and conflicts
+    const got = JSON.parse(await handleGetSkillManifest(deps, 'claude::conflict::aaa11111'));
+    expect(got.exists).toBe(true);
+    expect(got.precedence).toBe(85);
+    expect(got.conflicts).toHaveLength(1);
+    expect(got.conflicts[0].conflictKey).toBe('claude::shared-skill');
+    expect(got.conflicts[0].winnerPrecedence).toBe(85);
   });
 });

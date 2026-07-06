@@ -59,6 +59,12 @@ Three agents work in parallel after contracts and scaffold are frozen. Each agen
 **Consumes:** `NormalizedSkillInput` from fixtures.
 **Outputs:** `CompileResult`, `RetrievalBundle`.
 
+**Conflict resolution + diagnostics:** Track B owns precedence-based conflict
+detection and `SkillConflictDiagnostic` generation. Conflicts are non-fatal
+diagnostics on `CompileResult.diagnostics`, not `BoundaryError` entries. If
+the runtime still emits conflicts as errors, Track B must migrate to the
+diagnostics contract before claiming compliance.
+
 **Must not implement:** fs discovery, store, MCP tools.
 
 ---
@@ -81,6 +87,11 @@ Three agents work in parallel after contracts and scaffold are frozen. Each agen
 
 **Strategy:** Use mocks until Tracks A and B land real implementations.
 
+**Persistence + MCP exposure:** Track C owns persistence and MCP exposure of
+`SkillManifest.precedence`, `SkillManifest.conflicts`, and
+`CompileResult.diagnostics`. MCP tool responses must surface precedence and
+conflict diagnostics to clients when present.
+
 **Must not implement:** discovery internals, classification internals. Do not edit Track A or Track B files.
 
 ---
@@ -98,6 +109,9 @@ Three agents work in parallel after contracts and scaffold are frozen. Each agen
 | Domain | Owner |
 |---|---|
 | Skill IDs | Track B |
+| Conflict resolution + diagnostics | Track B |
+| Persistence of precedence/conflicts | Track C |
+| MCP exposure of diagnostics | Track C |
 | Persistence | Track C |
 | Path safety | Track A |
 
