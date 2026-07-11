@@ -129,6 +129,23 @@ export class FileStore {
     await atomicWrite(this.manifestsPath, json);
   }
 
+  get savingsPath(): string {
+    return join(this.baseDir, 'savings.json');
+  }
+
+  async readSavings(): Promise<unknown> {
+    for (const name of ['savings.json', 'checkout.json']) {
+      try { return JSON.parse(await readFile(join(this.baseDir, name), 'utf-8')); }
+      catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+    }
+    return [];
+  }
+
+  async writeSavings(records: unknown): Promise<void> {
+    await mkdir(this.baseDir, { recursive: true });
+    await atomicWrite(this.savingsPath, JSON.stringify(records, null, 2));
+  }
+
   async clear(): Promise<void> {
     try { await rm(this.baseDir, { recursive: true, force: true }); } catch { /* ok */ }
   }

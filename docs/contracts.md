@@ -121,9 +121,60 @@ export interface SkillSection {
   byteLength?: number;
   order?: number;
   precedence?: number;
+  requires?: string[];
+  related?: RelatedEdge[];
+  provides?: string[];
+  uses?: string[];
+  flowOf?: string[];
+  summary?: string;
+  keywords?: string[];
+  lineRange?: [number, number];
+  startAnchor?: { text: string; level: number };
+  contentSha256?: string;
+  oversized?: boolean;
 }
 
 export type SkillStore = Map<string, SkillSection> | Record<string, SkillSection>;
+
+export interface RelatedEdge {
+  id: string;
+  weight: number;
+  source: 'author' | 'inferred' | 'learned';
+}
+
+export interface FlowNode {
+  id: string;
+  summary: string;
+  steps: string[];
+}
+
+export interface ResolveRequest {
+  query: string;
+  phase?: string;
+  skill?: string;
+  budget?: number;
+  includeSoft?: boolean;
+  k?: number;
+}
+
+export interface ResolvedSection {
+  id: string;
+  headingPath: string[];
+  content: string;
+  role: 'hard' | 'soft';
+  order: number;
+  trustTier: string;
+}
+
+export interface ResolveResult {
+  query: string;
+  seed: string;
+  matchedFlow?: string;
+  collapsed: boolean;
+  sections: ResolvedSection[];
+  leftovers: string[];
+  budget: { limit: number; used: number };
+}
 
 export interface MandatoryPolicy {
   lines: string[];

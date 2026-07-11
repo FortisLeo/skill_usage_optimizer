@@ -168,6 +168,12 @@ describe('FileStore', () => {
     });
   });
 
+  it('writes and reads savings records across store objects', async () => {
+    const records = [{ tokenSavings: { tokensLoaded: 2, tokensWholeFile: 10, savingsPct: 80 }, multi: false, collapsed: false }];
+    await store.writeSavings(records);
+    expect(await new FileStore(dir).readSavings()).toEqual(records);
+  });
+
   describe('atomic writes', () => {
     it('does not leave .tmp files after writeIndex', async () => {
       await store.writeIndex({ a: '1' });

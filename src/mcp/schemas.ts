@@ -37,6 +37,20 @@ export interface ValidatedLoadSectionArgs {
   sectionId: string;
 }
 
+export interface ValidatedSearchSkillSectionsArgs {
+  query: string;
+  phase?: string;
+  skill?: string;
+  k?: number;
+}
+
+export interface ValidatedResolveTaskSectionsArgs {
+  query: string;
+  phase?: string;
+  skill?: string;
+  budget?: number;
+}
+
 export function validateIndexSkillsArgs(raw: unknown): {
   ok: true; value: ValidatedIndexSkillsArgs
 } | { ok: false; errors: string[] } {
@@ -170,4 +184,29 @@ export function validateLoadSectionArgs(raw: unknown): {
   }
 
   return { ok: true, value: { sectionId: a.sectionId } };
+}
+
+function validateSectionQueryArgs(raw: unknown, allowK: boolean): { ok: true; value: ValidatedSearchSkillSectionsArgs | ValidatedResolveTaskSectionsArgs } | { ok: false; errors: string[] } {
+  if (!raw || typeof raw !== 'object') return { ok: false, errors: ['arguments must be an object'] };
+  const a = raw as Record<string, unknown>;
+  const errors: string[] = [];
+  if (typeof a.query !== 'string' || a.query.trim().length === 0) errors.push('query must be a non-empty string');
+  if (a.phase !== undefined && (typeof a.phase !== 'string' || a.phase.trim().length === 0)) errors.push('phase must be a non-empty string when set');
+  if (a.skill !== undefined && (typeof a.skill !== 'string' || a.skill.trim().length === 0)) errors.push('skill must be a non-empty string when set');
+  if (allowK) {
+    if (a.k !== undefined && (!Number.isInteger(a.k) || (a.k as number) <= 0)) errors.push('k must be a positive integer');
+  } else if (a.budget !== undefined && (typeof a.budget !== 'number' || !Number.isFinite(a.budget) || a.budget <= 0)) {
+    errors.push('budget must be a positive number');
+  }
+  if (errors.length) return { ok: false, errors };
+  if (allowK) return { ok: true, value: { query: a.query as string, phase: a.phase as string | undefined, skill: a.skill as string | undefined, k: a.k as number | undefined } };
+  return { ok: true, value: { query: a.query as string, phase: a.phase as string | undefined, skill: a.skill as string | undefined, budget: a.budget as number | undefined } };
+}
+
+export function validateSearchSkillSectionsArgs(raw: unknown) { return validateSectionQueryArgs(raw, true) as { ok: true; value: ValidatedSearchSkillSectionsArgs } | { ok: false; errors: string[] }; }
+export function validateResolveTaskSectionsArgs(raw: unknown) { return validateSectionQueryArgs(raw, false) as { ok: true; value: ValidatedResolveTaskSectionsArgs } | { ok: false; errors: string[] }; }
+
+export function validateDoctorArgs(raw: unknown): { ok: true; value: Record<string, never> } | { ok: false; errors: string[] } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, errors: ['arguments must be an object'] };
+  return { ok: true, value: {} };
 }

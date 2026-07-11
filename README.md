@@ -82,7 +82,17 @@ Ruleloom has no network dependencies. It reads from local files, writes a local 
 
 ## MCP tools
 
-Ruleloom exposes six tools. Names are stable. Schemas are JSON Schema over the MCP `tools/call` method. Argument validation is strict and returns `{ errors: [...] }` for bad input rather than throwing.
+## CLI
+
+`ruleloom index`, `search`, `resolve`, `get`, `doctor`, `watch`, and `stats` are
+available after `npm run build`. `get skill#section` loads one section;
+`get skill` returns that skill's section list. Use `--json` for deterministic
+JSON output. `doctor` is read-only and exits 0 for clean, 1 for warnings, and 2
+for errors; MCP returns the same diagnostic report without an exit code.
+`stats` reports approximate process-local five-minute follow-up signals; this
+correlation resets on restart and is not true session correlation.
+
+Ruleloom exposes seven tools. Names are stable. Schemas are JSON Schema over the MCP `tools/call` method. Argument validation is strict and returns `{ errors: [...] }` for bad input rather than throwing.
 
 | Tool | Purpose |
 | --- | --- |
@@ -92,6 +102,7 @@ Ruleloom exposes six tools. Names are stable. Schemas are JSON Schema over the M
 | `get_skill_sections` | Read the section list (with class, policy, references) for one skill. |
 | `load_skill_context` | Retrieve minimal, policy-first context for a query, with budget controls. |
 | `load_section` | Load exactly one section by ID, plus its links and duplicate references. |
+| `doctor` | Read-only diagnostics for the indexed corpus. |
 
 Full schemas, input examples, and response shapes live in [docs/tool-reference.md](docs/tool-reference.md). If you are wiring Ruleloom into an agent, start with [docs/agent-guide.md](docs/agent-guide.md).
 

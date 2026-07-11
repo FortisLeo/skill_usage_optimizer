@@ -661,14 +661,15 @@ describe('handleListSkills', () => {
     expect(parsed.skills[0].tokenCount).toBe(3);
   });
 
-  it('returns structured rebuildRequired on stale sections', async () => {
+  it('returns stale load_skill_context fallback content with structured rebuildRequired', async () => {
     const section = makeSection('skill-1', '# Hello', 'h1', 'claude', 'skill-1');
     writeFileSync(section.sourcePath!, '# Changed', 'utf-8');
     section.mtimeMs = 0;
     section.size = 0;
     const deps = makeStubDeps({ store: makeStoreDeps({ 'skill-1': 'h1' }, [section]) });
-    const parsed = JSON.parse(await handleListSkills(deps));
-    expect(parsed.errors[0]).toContain('source changed');
+    const parsed = JSON.parse(await handleLoadSkillContext(deps));
+    expect(parsed.freshness).toBe('stale');
+    expect(parsed.content).toBe('# Changed');
     expect(parsed.rebuildRequired).toBeDefined();
     expect(parsed.rebuildRequired.code).toBe('REBUILD_REQUIRED');
     expect(parsed.rebuildRequired.action).toBe('index_skills');
@@ -1138,14 +1139,15 @@ describe('handleGetSkillSections', () => {
     expect(parsed.sections.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('returns stale source error with structured rebuildRequired', async () => {
+  it('returns stale load_section fallback content with structured rebuildRequired', async () => {
     const section = makeSection('skill-1', '# Hello', 'h1', 'claude', 'skill-1');
     writeFileSync(section.sourcePath!, '# Changed', 'utf-8');
     section.mtimeMs = 0;
     section.size = 0;
     const deps = makeStubDeps({ store: makeStoreDeps({ 'skill-1': 'h1' }, [section]) });
-    const parsed = JSON.parse(await handleGetSkillSections(deps, 'skill-1'));
-    expect(parsed.errors[0]).toContain('source changed; rerun index_skills');
+    const parsed = JSON.parse(await handleLoadSection(deps, 'skill-1'));
+    expect(parsed.freshness).toBe('stale');
+    expect(parsed.content).toBe('# Changed');
     expect(parsed.rebuildRequired).toBeDefined();
     expect(parsed.rebuildRequired.code).toBe('REBUILD_REQUIRED');
     expect(parsed.rebuildRequired.action).toBe('index_skills');

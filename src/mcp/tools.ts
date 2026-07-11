@@ -1,9 +1,13 @@
 // ponytail: pure MCP tool handlers with injected pipeline functions
-import { readFileSync, statSync } from 'node:fs';
-import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, RetrievalRequest, SkillConflictDiagnostic, SkillManifest, SkillStore as TypesSkillStore } from '../types.js';
+import { statSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
+import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, RetrievalRequest, SkillConflictDiagnostic, SkillManifest, SkillStore as TypesSkillStore, ResolveResult } from '../types.js';
 import type { SkillSection } from '../store/fileStore.js';
-import { computeHash, normalizeContent } from '../fs/freshness.js';
+import { computeHash, readSourceFile } from '../fs/freshness.js';
 import { extractMarkdownLinks } from '../retrieval/references.js';
+import { searchSections as defaultSearchSections } from '../search/lexical.js';
+import { resolve as defaultResolve } from '../resolver/index.js';
+import { doctor } from '../resolver/doctor.js';
 
 export interface ToolDeps {
   discover: (ctx: DiscoveryContext) => DiscoverResult;
@@ -17,10 +21,74 @@ export interface ToolDeps {
     writeSections: (sections: Map<string, SkillSection>) => Promise<void>;
     readManifests: () => Promise<Record<string, SkillManifest>>;
     writeManifests: (manifests: Record<string, SkillManifest>) => Promise<void>;
+    readSavings?: () => Promise<unknown>;
+    writeSavings?: (records: unknown) => Promise<void>;
     clear: () => Promise<void>;
   };
   resolveHomeDir: () => string;
   resolveWorkspaceRoot: () => string;
+  searchSections?: (store: TypesSkillStore | SkillSection[], query: string) => SkillSection[];
+  resolve?: (store: TypesSkillStore | SkillSection[], request: { query: string; phase?: string; skill?: string; budget?: number; includeSoft?: boolean }) => ResolveResult;
+}
+
+const USAGE_RETENTION = 100;
+let previousInstrumentedAt: number | undefined;
+
+// ponytail: approximate process-local correlation; resets on restart, conflates concurrent users under shared/HTTP deployment, and is not true session correlation.
+function beginInstrumentation(): { startedAt: number; followUp: boolean } {
+  const startedAt = performance.now();
+  const followUp = previousInstrumentedAt !== undefined && startedAt - previousInstrumentedAt <= 300000;
+  previousInstrumentedAt = startedAt;
+  return { startedAt, followUp };
+}
+
+async function persistUsage(deps: ToolDeps, record: Record<string, unknown>): Promise<void> {
+  try {
+    if (!deps.store.writeSavings) return;
+    const existing = deps.store.readSavings ? await deps.store.readSavings() : [];
+    const records = Array.isArray(existing)
+      ? existing
+      : (existing && typeof existing === 'object' && Array.isArray((existing as any).records) ? (existing as any).records : []);
+    await deps.store.writeSavings([...records, record].slice(-USAGE_RETENTION));
+  } catch {
+    // Usage persistence is best effort and must not affect tool behavior.
+  }
+}
+
+function skillMatches(section: SkillSection, skill: string): boolean {
+  return section.id === skill || section.manifestId === skill || section.manifestId?.split('::')[1] === skill;
+}
+
+async function sectionCandidates(deps: ToolDeps, phase?: string, skill?: string): Promise<{ sections?: SkillSection[]; error?: string }> {
+  const index = await deps.store.readIndex();
+  const all = [...(await deps.store.readSections(Object.keys(index))).values()];
+  let candidates = all;
+  if (skill) {
+    candidates = all.filter(s => skillMatches(s, skill));
+    if (candidates.length === 0) return { error: `skill "${skill}" not found in index` };
+  }
+  if (phase !== undefined) candidates = candidates.filter(s => s.class === 'phase');
+  if (phase !== undefined) candidates = (deps.searchSections ?? defaultSearchSections)(candidates, phase);
+  return { sections: candidates };
+}
+
+async function querySections(deps: ToolDeps, query: string, phase?: string, skill?: string): Promise<{ sections?: SkillSection[]; error?: string }> {
+  const candidates = await sectionCandidates(deps, phase, skill);
+  if (candidates.error) return candidates;
+  return { sections: (deps.searchSections ?? defaultSearchSections)(candidates.sections!, query) };
+}
+
+function tokenSavings(result: ResolveResult, sections: SkillSection[], manifests: Record<string, SkillManifest>): { tokensLoaded: number; tokensWholeFile: number | null; savingsPct: number | null } {
+  const tokensLoaded = result.sections.reduce((sum, s) => sum + (sections.find(x => x.id === s.id)?.tokenCount ?? 0), 0);
+  const manifestIds = new Set(result.sections.map(s => sections.find(x => x.id === s.id)?.manifestId).filter((id): id is string => !!id));
+  let whole = 0;
+  for (const id of manifestIds) {
+    const manifest = manifests[id];
+    if (!manifest || !Number.isFinite(manifest.tokenCount) || manifest.tokenCount <= 0) return { tokensLoaded, tokensWholeFile: null, savingsPct: null };
+    whole += manifest.tokenCount;
+  }
+  if (whole <= 0) return { tokensLoaded, tokensWholeFile: null, savingsPct: null };
+  return { tokensLoaded, tokensWholeFile: whole, savingsPct: Math.max(0, Math.min(100, (1 - tokensLoaded / whole) * 100)) };
 }
 
 function jsonResult(data: unknown): string {
@@ -52,7 +120,8 @@ function freshnessError(section: SkillSection): string | null {
   }
   if (stat.mtimeMs === section.mtimeMs && stat.size === section.size) return null;
   try {
-    const content = normalizeContent(readFileSync(section.sourcePath, 'utf-8'));
+    const content = readSourceFile(section.sourcePath);
+    if (content === undefined) return `section "${section.id}" source changed; rerun index_skills`;
     return computeHash(content) === section.sourceHash ? null : `section "${section.id}" source changed; rerun index_skills`;
   } catch {
     return `section "${section.id}" source changed; rerun index_skills`;
@@ -63,20 +132,22 @@ function staleErrors(sections: Iterable<SkillSection>): string[] {
   return [...sections].map(freshnessError).filter((e): e is string => e !== null);
 }
 
-// ponytail: structured rebuild-required response for stale index handling.
-// Returns stale errors + rebuildRequired with affected section/manifest IDs.
+// ponytail: stale indexes remain usable through current whole-file source fallback.
 function buildStaleResponse(staleSections: SkillSection[]): string {
-  const errors = staleErrors(staleSections);
   const manifestIds = [...new Set(staleSections.map(s => s.manifestId).filter((m): m is string => !!m))];
   return jsonResult({
-    errors,
+    freshness: 'stale',
     rebuildRequired: {
       code: 'REBUILD_REQUIRED',
       action: 'index_skills',
       sectionIds: staleSections.map(s => s.id),
       ...(manifestIds.length > 0 ? { manifestIds } : {}),
       reason: 'source_changed'
-    }
+    },
+    content: staleSections
+      .map(section => section.sourcePath ? readSourceFile(section.sourcePath) : undefined)
+      .filter((content): content is string => content !== undefined)
+      .join('\n\n')
   });
 }
 
@@ -495,6 +566,62 @@ export async function handleLoadSection(
   return jsonResult({
     section,
     references: [...refs.keys()],
-    duplicateRefs: duplicateRefs.length > 0 ? duplicateRefs : undefined
+    duplicateRefs: duplicateRefs.length > 0 ? duplicateRefs : undefined,
+    requires: section.requires ?? [],
+    related: section.related ?? [],
+    flowOf: section.flowOf ?? []
   });
+}
+
+export async function handleSearchSkillSections(deps: ToolDeps, query: string, phase?: string, skill?: string, k?: number): Promise<string> {
+  const instrumentation = beginInstrumentation();
+  let success = false;
+  try {
+    const result = await querySections(deps, query, phase, skill);
+    if (result.error) return jsonResult({ errors: [result.error] });
+    success = true;
+    return jsonResult({ query, sections: result.sections!.slice(0, k ?? 10), count: Math.min(result.sections!.length, k ?? 10) });
+  } finally {
+    await persistUsage(deps, {
+      timestamp: new Date().toISOString(), handler: 'search_skill_sections',
+      latencyMs: performance.now() - instrumentation.startedAt, success, followUp: instrumentation.followUp
+    });
+  }
+}
+
+export async function handleResolveTaskSections(deps: ToolDeps, query: string, phase?: string, skill?: string, budget?: number, includeSoft?: boolean): Promise<string> {
+  const instrumentation = beginInstrumentation();
+  let success = false;
+  let usageSavings: ReturnType<typeof tokenSavings> | undefined;
+  let usageCollapsed: boolean | undefined;
+  let usageMulti: boolean | undefined;
+  try {
+    const scoped = await sectionCandidates(deps, undefined, skill);
+    if (scoped.error) return jsonResult({ errors: [scoped.error] });
+    const found = await sectionCandidates(deps, phase);
+    if (found.error) return jsonResult({ errors: [found.error] });
+    const sections = found.sections!;
+    const resolver = deps.resolve ?? defaultResolve;
+    const result = resolver(sections, { query, skill, budget, ...(includeSoft === undefined ? {} : { includeSoft }) });
+    const manifests = await deps.store.readManifests();
+    const savings = tokenSavings(result, sections, manifests);
+    usageSavings = savings;
+    usageCollapsed = result.collapsed;
+    usageMulti = result.sections.length > 1;
+    success = true;
+    return jsonResult({ ...result, tokenSavings: savings });
+  } finally {
+    await persistUsage(deps, {
+      timestamp: new Date().toISOString(), handler: 'resolve_task_sections',
+      latencyMs: performance.now() - instrumentation.startedAt, success, followUp: instrumentation.followUp,
+      ...(usageSavings ? { tokenSavings: usageSavings, collapsed: usageCollapsed, multi: usageMulti } : {})
+    });
+  }
+}
+
+export async function handleDoctor(deps: ToolDeps): Promise<string> {
+  const index = await deps.store.readIndex();
+  const sections = await deps.store.readSections(Object.keys(index));
+  const manifests = await deps.store.readManifests();
+  return jsonResult(doctor(sections, manifests));
 }

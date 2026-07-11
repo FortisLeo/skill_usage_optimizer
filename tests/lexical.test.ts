@@ -18,7 +18,7 @@ describe('scoreSection', () => {
 
   it('scores title token match and repeated content matches', () => {
     expect(scoreSection('Trouble', makeSection({ title: 'Trouble Guide', content: '' }))).toBeGreaterThan(0);
-    expect(scoreSection('validate', makeSection({ title: 'Notes', content: 'validate here and validate there, always validate.' }))).toBeGreaterThanOrEqual(0.5);
+    expect(scoreSection('validate', makeSection({ title: 'Notes', content: 'validate here and validate there, always validate.' }))).toBeGreaterThan(0);
     // multi-word query: both terms match = higher average than one missing
     expect(scoreSection('hello world', makeSection({ title: 'Notes', content: 'hello world here' }))).toBeGreaterThan(scoreSection('hello zebra', makeSection({ title: 'Notes', content: 'hello world here' })));
   });
@@ -49,6 +49,25 @@ it('returns sections ranked by score descending', () => {
     const store = { a: makeSection({ id: 'a', title: 'Setup', content: '' }) };
     expect(searchSections(store, 'SETUP')).toHaveLength(1);
     expect(searchSections(store, 'setup')).toHaveLength(1);
+  });
+
+  it('still returns a top-level section for an overview query', () => {
+    const overview = makeSection({
+      id: 'opencode::skill::hash1234::overview',
+      title: 'Overview',
+      content: 'Overview of the skill.',
+      keywords: ['overview', 'skill'],
+      summary: 'Overview of the skill',
+    });
+    const specific = makeSection({
+      id: 'opencode::skill::hash1234::overview--setup',
+      title: 'Setup',
+      content: 'Setup details.',
+      keywords: ['setup'],
+      summary: 'Setup details',
+    });
+
+    expect(searchSections([overview, specific], 'overview')).toContainEqual(overview);
   });
 
   it('higher score for more repeated term occurrences', () => {

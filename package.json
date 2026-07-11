@@ -4,7 +4,8 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "skill-usage-optimizer": "./dist/index.js"
+    "skill-usage-optimizer": "./dist/cli.js",
+    "ruleloom": "./dist/cli.js"
   },
   "types": "./dist/index.d.ts",
   "exports": {
@@ -20,8 +21,12 @@
   "scripts": {
     "test": "vitest --run",
     "typecheck": "tsc --noEmit",
+    "eval:p3": "node scripts/p3-eval.mjs",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "cli": "node dist/cli.js",
+    "diagnose:bm25f": "npm run build && node scripts/diagnose-bm25f.mjs",
+    "eval:cli-p5": "node scripts/cli-p5-eval.mjs"
   },
   "devDependencies": {
     "@types/node": "26.1.0",

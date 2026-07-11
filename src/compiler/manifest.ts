@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { relative, resolve as resolvePath, isAbsolute } from 'node:path';
-import type { DiscoveryContext, NormalizedSkillInput, ReferenceRef, SkillConflictDiagnostic, SkillManifest, SkillSection } from '../types.js';
+import type { DiscoveryContext, NormalizedSkillInput, ReferenceRef, SkillConflictDiagnostic, SkillManifest, SkillSection, RelatedEdge } from '../types.js';
 import { parseMarkdown, type ParsedSection } from '../parser/markdown.js';
 import { extractReferences } from '../retrieval/references.js';
 import { classifyHeading } from './classify.js';
 import { sectionId } from './ids.js';
 import { extractPolicyLines } from './policy.js';
+import { extractIdentifiers, extractProvidedSymbols, extractUsedSymbols } from '../search/identifiers.js';
 
 function flatten(sections: ParsedSection[]): ParsedSection[] {
   return sections.flatMap(section => [section, ...flatten(section.children)]);
@@ -47,6 +48,55 @@ export function buildSections(input: NormalizedSkillInput, ctx: DiscoveryContext
     const hash = createHash('sha256').update(content).digest('hex');
     const policyLines = extractPolicyLines(content);
     const byteLength = Buffer.byteLength(content, 'utf-8');
+
+    const headingWords = section.heading.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+
+    // Guardrail 3: only aggregate into empty-bodied parents with children
+    let summary = '';
+    let keywords = [...headingWords];
+    let provides: string[] = [];
+    let uses: string[] = [];
+    let codeIdentifiers: string[] = [];
+
+    if (content) {
+      // Normal case: section has its own body text
+      const firstPara = content.split('\n\n').find(p => p.trim().length > 0 && !p.trim().startsWith('```'));
+      summary = firstPara ? firstPara.replace(/^[^a-zA-Z0-9]*/, '').split(/[.!?]/).filter(Boolean)[0]?.trim() ?? '' : '';
+      const codeBlocks = extractFenceContent(content);
+      const codeText = codeBlocks.join('\n');
+      codeIdentifiers = extractIdentifiers(codeText);
+      keywords = [...new Set([...headingWords, ...codeIdentifiers])];
+      provides = extractProvidedSymbols(codeText);
+      uses = extractUsedSymbols(codeText);
+    } else if (section.children.length > 0) {
+      // Empty-bodied parent with children: aggregate child metadata (Guarail 1+3)
+      const childWords = new Set<string>();
+      const childSentences: string[] = [];
+      for (const child of section.children) {
+        const childContent = child.content.trim();
+        if (childContent) {
+          child.heading.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2).forEach((w: string) => childWords.add(w));
+          const childCode = extractIdentifiers(childContent);
+          childCode.forEach((w: string) => childWords.add(w));
+          const firstPara = childContent.split('\n\n').find((p: string) => p.trim().length > 0 && !p.trim().startsWith('```'));
+          if (firstPara) {
+            const firstSentence = firstPara.replace(/^[^a-zA-Z0-9]*/, '').split(/[.!?]/).filter(Boolean)[0]?.trim();
+            if (firstSentence) childSentences.push(firstSentence);
+          }
+        }
+      }
+      if (childWords.size > 0) {
+        keywords = [...new Set([...headingWords, ...childWords])];
+      }
+      if (childSentences.length > 0) {
+        summary = childSentences.join('. ');
+      }
+    }
+
+    // Extract requires/related from HTML comments: <!-- requires: ... --> and <!-- related: ... -->
+    const requires = extractRequireDeclarations(content);
+    const related = extractRelatedDeclarations(content);
+
     return {
       id,
       title: section.heading,
@@ -63,7 +113,13 @@ export function buildSections(input: NormalizedSkillInput, ctx: DiscoveryContext
       references: resolveFileRefs(extractReferences(content), input.sourcePath, ctx),
       tokenCount: countTokens(section.heading + '\n' + content),
       byteLength,
-      order
+order,
+      summary,
+      keywords,
+      provides,
+      uses,
+      requires,
+      related,
     };
   });
 }
@@ -101,4 +157,38 @@ export function buildManifest(
 
 function countTokens(text: string): number {
   return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+function extractRequireDeclarations(content: string): string[] {
+  const match = content.match(/<!--\s*requires:\s*([^>]+)\s*-->/);
+  if (!match) return [];
+  return match[1]!.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function extractRelatedDeclarations(content: string): RelatedEdge[] {
+  const match = content.match(/<!--\s*related:\s*([^>]+)\s*-->/);
+  if (!match) return [];
+  return match[1]!.split(',').map(pair => {
+    const [id, weightStr] = pair.trim().split(':');
+    return {
+      id: id?.trim() ?? '',
+      weight: weightStr ? parseFloat(weightStr) : 0.5,
+      source: 'author' as const,
+    };
+  }).filter(r => r.id.length > 0);
+}
+
+function extractFenceContent(text: string): string[] {
+  const blocks: string[] = [];
+  let inFence = false;
+  let fenceContent = '';
+  for (const line of text.split('\n')) {
+    if (/^\s*```/.test(line)) {
+      if (inFence) { blocks.push(fenceContent); fenceContent = ''; }
+      inFence = !inFence;
+    } else if (inFence) {
+      fenceContent += (fenceContent ? '\n' : '') + line;
+    }
+  }
+  return blocks;
 }

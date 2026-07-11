@@ -9,6 +9,14 @@ export function fileHash(path: string): string {
   return computeHash(readFileSync(path, 'utf-8'));
 }
 
+export function readSourceFile(sourcePath: string): string | undefined {
+  try {
+    return normalizeContent(readFileSync(sourcePath, 'utf-8'));
+  } catch {
+    return undefined;
+  }
+}
+
 export function statFile(path: string): { mtimeMs: number; size: number } | null {
   try {
     const s = statSync(path);

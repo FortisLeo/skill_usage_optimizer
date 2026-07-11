@@ -1,0 +1,194 @@
+[
+  {
+    "query": "setup instructions for the skill",
+    "skill": "well-structured",
+    "expectedSection": "setup",
+    "expectedSectionIds": ["setup"],
+    "isMultiSection": false,
+    "notes": "Real — paraphrased task: user needs to locate setup docs"
+  },
+  {
+    "query": "how to use this skill",
+    "skill": "well-structured",
+    "expectedSection": "usage",
+    "expectedSectionIds": ["usage"],
+    "isMultiSection": false,
+    "notes": "Synthetic — heading keyword match"
+  },
+  {
+    "query": "skill examples",
+    "skill": "well-structured",
+    "expectedSection": "examples",
+    "expectedSectionIds": ["examples"],
+    "isMultiSection": false,
+    "notes": "Synthetic — direct heading match"
+  },
+  {
+    "query": "troubleshooting errors and issues",
+    "skill": "well-structured",
+    "expectedSection": "troubleshooting",
+    "expectedSectionIds": ["troubleshooting"],
+    "isMultiSection": false,
+    "notes": "Synthetic — heading keyword match"
+  },
+  {
+    "query": "reference documentation and links",
+    "skill": "well-structured",
+    "expectedSection": "references",
+    "expectedSectionIds": ["references"],
+    "isMultiSection": false,
+    "notes": "Synthetic — heading keyword match"
+  },
+  {
+    "query": "how do I run this skill from the command line",
+    "skill": "well-structured",
+    "expectedSection": "usage",
+    "expectedSectionIds": ["usage"],
+    "isMultiSection": false,
+    "notes": "Real — task paraphrase"
+  },
+  {
+    "query": "check file permissions when the skill fails with access denied",
+    "skill": "well-structured",
+    "expectedSection": "troubleshooting",
+    "expectedSectionIds": ["troubleshooting"],
+    "isMultiSection": false,
+    "notes": "Real — scenario-based query matching H3 content"
+  },
+  {
+    "query": "find all configuration prerequisites before starting",
+    "skill": "well-structured",
+    "expectedSection": "setup",
+    "expectedSectionIds": ["setup"],
+    "isMultiSection": false,
+    "notes": "Real — prerequisite paraphrase"
+  },
+  {
+    "query": "browser automation setup prerequisites",
+    "skill": "chrome-automation",
+    "expectedSection": "setup",
+    "expectedSectionIds": ["setup"],
+    "isMultiSection": false,
+    "notes": "Synthetic — direct heading match"
+  },
+  {
+    "query": "navigate to a URL and wait for page load",
+    "skill": "chrome-automation",
+    "expectedSection": "navigation",
+    "expectedSectionIds": ["navigation"],
+    "isMultiSection": false,
+    "notes": "Synthetic — heading content match"
+  },
+  {
+    "query": "fill in form fields on a web page",
+    "skill": "chrome-automation",
+    "expectedSection": "form-filling",
+    "expectedSectionIds": ["form-filling"],
+    "isMultiSection": false,
+    "notes": "Synthetic — heading keyword match"
+  },
+  {
+    "query": "take a screenshot of the full page",
+    "skill": "chrome-automation",
+    "expectedSection": "screenshots",
+    "expectedSectionIds": ["screenshots"],
+    "isMultiSection": false,
+    "notes": "Real — user asks how to capture a browser screenshot in automation"
+  },
+  {
+    "query": "log into the portal in Chrome",
+    "skill": "chrome-automation",
+    "expectedSection": "form-filling",
+    "expectedSectionIds": ["form-filling"],
+    "isMultiSection": false,
+    "notes": "Real — task scenario from the spec's running example"
+  },
+  {
+    "query": "clear cookies before testing session persistence",
+    "skill": "chrome-automation",
+    "expectedSection": "cookie-handling",
+    "expectedSectionIds": ["cookie-handling"],
+    "isMultiSection": false,
+    "notes": "Real — task scenario with context"
+  },
+  {
+    "query": "submit the form after all fields are filled, then check for validation errors",
+    "skill": "chrome-automation",
+    "expectedSection": "submit",
+    "expectedSectionIds": ["submit"],
+    "isMultiSection": false,
+    "notes": "Real — task completion: user has filled fields and needs the final submission step"
+  },
+  {
+    "query": "fill and submit a signup form end to end",
+    "skill": "chrome-automation",
+    "expectedSection": "form-filling",
+    "expectedSectionIds": ["form-filling", "submit"],
+    "isMultiSection": true,
+    "notes": "Real — multi-step workflow: fill fields then submit. Tests dependency resolution, not just search."
+  },
+  {
+    "query": "set up the database then run the initial migration",
+    "skill": "database-ops",
+    "expectedSection": "setup",
+    "expectedSectionIds": ["setup", "migrations"],
+    "isMultiSection": true,
+    "notes": "Real — sequential workflow across setup and migrations. Tests dependency resolution, not just search."
+  },
+  {
+    "query": "connect to database and configure connection string",
+    "skill": "database-ops",
+    "expectedSection": "setup",
+    "expectedSectionIds": ["setup"],
+    "isMultiSection": false,
+    "notes": "Synthetic — direct heading match"
+  },
+  {
+    "query": "run select queries against the users table",
+    "skill": "database-ops",
+    "expectedSection": "querying",
+    "expectedSectionIds": ["querying"],
+    "isMultiSection": false,
+    "notes": "Synthetic — heading content match"
+  },
+  {
+    "query": "apply database schema migrations",
+    "skill": "database-ops",
+    "expectedSection": "migrations",
+    "expectedSectionIds": ["migrations"],
+    "isMultiSection": false,
+    "notes": "Real — developer task: run pending migrations before deploy"
+  },
+  {
+    "query": "create a backup of the production database",
+    "skill": "database-ops",
+    "expectedSection": "backup",
+    "expectedSectionIds": ["backup"],
+    "isMultiSection": false,
+    "notes": "Synthetic — heading keyword match"
+  },
+  {
+    "query": "database connection refused how to fix",
+    "skill": "database-ops",
+    "expectedSection": "troubleshooting",
+    "expectedSectionIds": ["troubleshooting"],
+    "isMultiSection": false,
+    "notes": "Real — common operational question"
+  },
+  {
+    "query": "rollback a failed migration and check history",
+    "skill": "database-ops",
+    "expectedSection": "troubleshooting",
+    "expectedSectionIds": ["troubleshooting"],
+    "isMultiSection": false,
+    "notes": "Real — migration failure scenario"
+  },
+  {
+    "query": "restore database from backup after corruption",
+    "skill": "database-ops",
+    "expectedSection": "backup",
+    "expectedSectionIds": ["backup"],
+    "isMultiSection": false,
+    "notes": "Real — disaster recovery scenario"
+  }
+]

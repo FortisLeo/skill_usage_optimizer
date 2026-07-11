@@ -9,6 +9,8 @@ import { discover } from '../discovery/index.js';
 import { normalize } from '../normalize/index.js';
 import { compile } from '../compiler/index.js';
 import { loadContext } from '../retrieval/context.js';
+import { searchSections } from '../search/lexical.js';
+import { resolve as resolveTask } from '../resolver/index.js';
 import { FileStore } from '../store/fileStore.js';
 import type { ToolDeps } from './tools.js';
 import {
@@ -17,7 +19,10 @@ import {
   handleGetSkillManifest,
   handleGetSkillSections,
   handleLoadSkillContext,
-  handleLoadSection
+  handleLoadSection,
+  handleSearchSkillSections,
+  handleResolveTaskSections,
+  handleDoctor
 } from './tools.js';
 import {
   validateIndexSkillsArgs,
@@ -25,12 +30,12 @@ import {
   validateGetSkillManifestArgs,
   validateGetSkillSectionsArgs,
   validateLoadSkillContextArgs,
-  validateLoadSectionArgs
+  validateLoadSectionArgs, validateSearchSkillSectionsArgs, validateResolveTaskSectionsArgs, validateDoctorArgs
 } from './schemas.js';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
-const TOOL_DEFS = [
+export const TOOL_DEFS = [
   {
     name: 'index_skills',
     description: 'Discover, normalize, and compile skills from a source system into the local cache.',
@@ -100,6 +105,21 @@ const TOOL_DEFS = [
       },
       required: ['sectionId']
     }
+  },
+  {
+    name: 'search_skill_sections',
+    description: 'Search indexed sections. With phase, deliberately AND-filters to phase-class sections that lexically match the phase, then ranks by query; this differs from load_skill_context.',
+    inputSchema: { type: 'object', properties: { query: { type: 'string' }, phase: { type: 'string' }, skill: { type: 'string' }, k: { type: 'integer', minimum: 1 } }, required: ['query'] }
+  },
+  {
+    name: 'resolve_task_sections',
+    description: 'Resolve task sections and dependencies. With phase, deliberately AND-filters to phase-class sections that lexically match the phase, then resolves by query; this differs from load_skill_context.',
+    inputSchema: { type: 'object', properties: { query: { type: 'string' }, phase: { type: 'string' }, skill: { type: 'string' }, budget: { type: 'number', exclusiveMinimum: 0 } }, required: ['query'] }
+  },
+  {
+    name: 'doctor',
+    description: 'Check optimizer health without changing the index.',
+    inputSchema: { type: 'object', properties: {} }
   }
 ];
 
@@ -109,7 +129,7 @@ export interface McpServerOptions {
   workspaceRoot?: string;
 }
 
-export async function startMcpServer(opts: McpServerOptions = {}): Promise<void> {
+export async function createToolDeps(opts: McpServerOptions = {}): Promise<ToolDeps> {
   const storeDir = opts.storeDir ?? resolve(process.cwd(), '.skill-cache');
   const homeDir = opts.homeDir ?? homedir();
   const workspaceRoot = opts.workspaceRoot ?? process.cwd();
@@ -117,7 +137,7 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
   const fileStore = new FileStore(storeDir);
   await fileStore.init();
 
-  const deps: ToolDeps = {
+  return {
     discover,
     normalize,
     // ponytail: adapter — compiler returns Map|Record union, handler expects Map
@@ -130,11 +150,17 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
         diagnostics: result.diagnostics
       };
     },
-    loadContext,
+      loadContext,
+      searchSections,
+      resolve: resolveTask,
     store: fileStore,
     resolveHomeDir: () => homeDir,
     resolveWorkspaceRoot: () => workspaceRoot
   };
+}
+
+export async function startMcpServer(opts: McpServerOptions = {}): Promise<void> {
+  const deps = await createToolDeps(opts);
 
   const server = new Server(
     { name: 'skill-usage-optimizer', version: '0.1.0' },
@@ -184,6 +210,25 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
           const text = await handleLoadSection(deps, v.value.sectionId);
           return { content: [{ type: 'text', text }] };
         }
+        case 'search_skill_sections': {
+          const v = validateSearchSkillSectionsArgs(args ?? {});
+          if (!v.ok) return { content: [{ type: 'text', text: JSON.stringify({ errors: v.errors }) }], isError: true };
+          const text = await handleSearchSkillSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.k);
+          const parsed = JSON.parse(text);
+          return { content: [{ type: 'text', text }], ...(parsed.errors ? { isError: true } : {}) };
+        }
+        case 'resolve_task_sections': {
+          const v = validateResolveTaskSectionsArgs(args ?? {});
+          if (!v.ok) return { content: [{ type: 'text', text: JSON.stringify({ errors: v.errors }) }], isError: true };
+          const text = await handleResolveTaskSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.budget);
+          const parsed = JSON.parse(text);
+          return { content: [{ type: 'text', text }], ...(parsed.errors ? { isError: true } : {}) };
+        }
+        case 'doctor': {
+          const v = validateDoctorArgs(args ?? {});
+          if (!v.ok) return { content: [{ type: 'text', text: JSON.stringify({ errors: v.errors }) }], isError: true };
+           return { content: [{ type: 'text', text: await handleDoctor(deps) }] };
+        }
         default:
           return {
             content: [{ type: 'text', text: JSON.stringify({ errors: [`unknown tool: ${name}`] }) }],
@@ -200,4 +245,48 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+export async function handleMcpToolCall(deps: ToolDeps, name: string, args: unknown = {}): Promise<any> {
+  const error = (errors: string[]) => ({ content: [{ type: 'text' as const, text: JSON.stringify({ errors }) }], isError: true });
+  try {
+    if (name === 'index_skills') {
+      const v = validateIndexSkillsArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleIndexSkills(deps, v.value.system, v.value.roots, v.value.baseDir, v.value.force) }] };
+    }
+    if (name === 'get_skill_sections') {
+      const v = validateGetSkillSectionsArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleGetSkillSections(deps, v.value.skillId) }] };
+    }
+    if (name === 'load_section') {
+      const v = validateLoadSectionArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleLoadSection(deps, v.value.sectionId) }] };
+    }
+    if (name === 'search_skill_sections') {
+      const v = validateSearchSkillSectionsArgs(args);
+      if (!v.ok) return error(v.errors);
+      const text = await handleSearchSkillSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.k);
+      const parsed = JSON.parse(text);
+      return { content: [{ type: 'text', text }], ...(parsed.errors ? { isError: true } : {}) };
+    }
+    if (name === 'resolve_task_sections') {
+      const raw = args && typeof args === 'object' ? args as Record<string, unknown> : args;
+      const v = validateResolveTaskSectionsArgs(raw);
+      if (!v.ok) return error(v.errors);
+      const text = await handleResolveTaskSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.budget, (raw as Record<string, unknown>)?.includeSoft as boolean | undefined);
+      const parsed = JSON.parse(text);
+      return { content: [{ type: 'text', text }], ...(parsed.errors ? { isError: true } : {}) };
+    }
+    if (name === 'doctor') {
+      const v = validateDoctorArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleDoctor(deps) }] };
+    }
+    return error([`unknown tool: ${name}`]);
+  } catch (err) {
+    return error([err instanceof Error ? err.message : String(err)]);
+  }
 }

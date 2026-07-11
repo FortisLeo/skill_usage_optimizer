@@ -1,6 +1,6 @@
 # Tool Reference
 
-Ruleloom exposes six MCP tools. Every tool takes a JSON object, returns a JSON string in the `content` array, and reports errors in the same shape:
+Ruleloom exposes nine MCP tools. Every tool takes a JSON object, returns a JSON string in the `content` array, and reports errors in the same shape:
 
 ```json
 { "errors": ["system must be one of: claude, opencode, codex, copilot"] }
@@ -383,6 +383,8 @@ Load exactly one section by ID, plus the references it makes and a duplicate-ref
 
 `duplicateRefs` lists any link target (wikilink or markdown link) that appears more than once in the section body. A duplicate usually means the section was copy-pasted across edits without cleanup. Treat it as a signal, not an error. The field is omitted entirely when no duplicates exist.
 
+`load_section` also returns additive dependency metadata: `requires`, `related`, and `flowOf`.
+
 ### Not found
 
 ```json
@@ -392,6 +394,23 @@ Load exactly one section by ID, plus the references it makes and a duplicate-ref
 The section ID must come from a live index entry. Ruleloom refuses to return section files that are not in `index.json` (orphan files in the cache are ignored).
 
 ---
+
+## `search_skill_sections`
+
+Search indexed sections with `query`, optionally limited by `k` and `skill`. When `phase` is supplied, this new tool deliberately uses AND semantics: it first narrows to `class: "phase"` sections that lexically match the phase using the existing phase-selection primitive, then ranks those sections by `query`. This intentionally differs from `load_skill_context`, whose phase behavior is unchanged.
+
+## `resolve_task_sections`
+
+Resolve task sections and their dependency closure with `query`, optional `skill`, and optional `budget`. When `phase` is supplied, this new tool uses the same deliberate AND filter as `search_skill_sections` before resolving by query. The response keeps the existing `ResolveResult` fields and adds an MCP-only `tokenSavings` envelope with `tokensLoaded`, `tokensWholeFile`, and bounded `savingsPct`; missing or zero canonical denominators are returned as `null`.
+
+## `doctor`
+
+Returns a read-only diagnostic report: `{ "status": "clean" | "warnings" | "errors", "diagnostics": [] }`.
+Diagnostics cover dependency cycles, missing requirements, trust direction, oversized sections, and safety policy text in shadowed sources. The CLI exits 0, 1, or 2 for clean, warnings, or errors respectively; MCP reports status only.
+
+## `stats`
+
+Stats includes `usageSignals` aggregated from recent, minimized records. `sessionCorrelation` is `approximate (process-local, 5min window)`: it resets on restart, can conflate concurrent users under shared/HTTP deployment, and is not true session correlation. No query, task text, returned content or IDs, session/user/IP/header data, or error text is persisted.
 
 ## Common shapes
 
@@ -439,3 +458,10 @@ Returned by `index_skills` and embedded in `get_skill_manifest`:
 ```
 
 `reason` is `higher_precedence` (one source had a higher precedence level and won outright) or `same_precedence_tiebreak` (same precedence level, deterministic tiebreak by source path, then source hash). The winner is what Ruleloom actually applied. The shadowed entries are still on disk and still hash to the same content. They were not used because the precedence rules said not to. The same `<system>::<skillName>` is the conflict key — the source-hash suffix is not part of it, so two builds with different source content collide under one key.
+## CLI
+
+The built package also provides the `ruleloom` CLI. `index`, `search`,
+`resolve`, `get`, `doctor`, `watch`, and `stats` delegate to the same
+application handlers as MCP. `get skill#section` maps to `load_section`, while
+`get skill` maps to `get_skill_sections`. `--json` produces deterministic JSON.
+The P6 doctor exit contract is reserved: 0 clean, 1 warnings, 2 errors.

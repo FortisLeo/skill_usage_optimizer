@@ -3,6 +3,7 @@ export { discover } from './discovery/index.js';
 export { normalize } from './normalize/index.js';
 export { compile } from './compiler/index.js';
 export { loadContext } from './retrieval/context.js';
+export { doctor, MAX_SECTION_TOKENS } from './resolver/doctor.js';
 export { FileStore } from './store/fileStore.js';
 export type { ToolDeps } from './mcp/tools.js';
 export type { McpServerOptions } from './mcp/server.js';
@@ -21,6 +22,11 @@ export type {
   NormalizeResult,
   OmittedItem,
   ReferenceRef,
+  RelatedEdge,
+  FlowNode,
+  ResolveRequest,
+  ResolvedSection,
+  ResolveResult,
   RetrievalBundle,
   RetrievalRequest,
   SectionClass,
