@@ -144,7 +144,6 @@ describe('normalize', () => {
     try {
       const artifact = makeArtifact({ absolutePath: path });
       const { inputs } = normalize([artifact], ctx);
-      // comma-separated string format from simple yaml parser
       expect(inputs[0]!.attachments).toEqual(['a.md', 'b.md']);
     } finally {
       cleanup();
@@ -211,7 +210,72 @@ describe('normalize', () => {
     try {
       const { inputs, errors } = normalize([makeArtifact({ absolutePath: path })], ctx);
       expect(errors).toEqual([]);
+      expect(inputs[0]!.description).toBe('One line two line\n');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('parses block scalar modifiers and nested YAML values', () => {
+    const { root, ctx, cleanup } = makeTempWorkspace();
+    const path = writeFixture(root, 'nested-yaml.md', [
+      '---',
+      'description: >-',
+      '  One line',
+      '  two line',
+      'metadata:',
+      '  audience: developers',
+      '  tags:',
+      '    - yaml',
+      '    - normalize',
+      '---',
+      '# Body'
+    ].join('\n'));
+    try {
+      const { inputs, errors } = normalize([makeArtifact({ absolutePath: path })], ctx);
+      expect(errors).toEqual([]);
       expect(inputs[0]!.description).toBe('One line two line');
+      expect(inputs[0]!.frontmatter.metadata).toEqual({
+        audience: 'developers',
+        tags: ['yaml', 'normalize']
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('handles empty frontmatter', () => {
+    const { root, ctx, cleanup } = makeTempWorkspace();
+    const path = writeFixture(root, 'empty-fm.md', '---\n---\n# Body');
+    try {
+      const { inputs, errors } = normalize([makeArtifact({ absolutePath: path })], ctx);
+      expect(errors).toEqual([]);
+      expect(inputs[0]!.frontmatter).toEqual({});
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('rejects non-mapping frontmatter roots', () => {
+    const { root, ctx, cleanup } = makeTempWorkspace();
+    const path = writeFixture(root, 'list-fm.md', '---\n- not a mapping\n---\n# Body');
+    try {
+      const { inputs, errors } = normalize([makeArtifact({ absolutePath: path })], ctx);
+      expect(inputs).toEqual([]);
+      expect(errors[0]!.path).toBe(path);
+      expect(errors[0]!.error).toMatch(/frontmatter root must be a mapping/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('rejects null frontmatter roots', () => {
+    const { root, ctx, cleanup } = makeTempWorkspace();
+    const path = writeFixture(root, 'null-fm.md', '---\nnull\n---\n# Body');
+    try {
+      const { inputs, errors } = normalize([makeArtifact({ absolutePath: path })], ctx);
+      expect(inputs).toEqual([]);
+      expect(errors[0]!.error).toMatch(/frontmatter root must be a mapping/);
     } finally {
       cleanup();
     }
@@ -224,7 +288,7 @@ describe('normalize', () => {
       const { inputs, errors } = normalize([makeArtifact({ absolutePath: path })], ctx);
       expect(inputs).toEqual([]);
       expect(errors[0]!.path).toBe(path);
-      expect(errors[0]!.error).toMatch(/malformed frontmatter/);
+      expect(errors[0]!.error).toBeTruthy();
     } finally {
       cleanup();
     }

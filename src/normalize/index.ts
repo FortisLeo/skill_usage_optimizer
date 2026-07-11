@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import { basename, extname, dirname } from 'node:path';
+import YAML from 'yaml';
 import type { BoundaryError, DiscoveredArtifact, DiscoveryContext, NormalizeResult, NormalizedSkillInput } from '../types.js';
 import { computeHash, normalizeContent } from '../fs/freshness.js';
 import { isPathSafe, collectAllowedRoots } from '../fs/roots.js';
@@ -71,52 +72,18 @@ function extractSimpleFrontmatter(raw: string): { frontmatter: Record<string, un
   const fmBlock = lines.slice(1, end).join('\n');
   const body = lines.slice(end + 1).join('\n').replace(/^\n+/, '');
 
-  return { frontmatter: parseSimpleYaml(fmBlock), body };
-}
+  if (fmBlock.trim().length === 0) return { frontmatter: {}, body };
 
-function parseSimpleYaml(yaml: string): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  const lines = yaml.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const match = line.match(/^(\w[\w-]*)\s*:\s*(.*)/);
-    if (!match) continue;
-    const key = match[1]!;
-    let val = match[2]!.trim();
-    if (val === '|' || val === '>') {
-      const block: string[] = [];
-      while (i + 1 < lines.length && /^\s+/.test(lines[i + 1]!)) {
-        block.push(lines[++i]!.replace(/^ {1,2}/, ''));
-      }
-      result[key] = val === '|'
-        ? block.join('\n').replace(/\n$/, '')
-        : block.map(s => s.trim()).join(' ').replace(/\s+/g, ' ').trim();
-    } else if (val === '') {
-      const list: string[] = [];
-      while (i + 1 < lines.length) {
-        const item = lines[i + 1]!.match(/^\s+-\s*(.*)$/);
-        if (!item) break;
-        list.push(unquote(item[1]!.trim()));
-        i++;
-      }
-      result[key] = list.length > 0 ? list : null;
-    } else if (val === '~' || val === 'null') {
-      result[key] = null;
-    } else if (val === 'true') {
-      result[key] = true;
-    } else if (val === 'false') {
-      result[key] = false;
-    } else if (/^-?\d+(\.\d+)?$/.test(val)) {
-      result[key] = Number(val);
-    } else {
-      result[key] = unquote(val);
-    }
+  const parsed = YAML.parse(fmBlock, {
+    schema: 'core',
+    customTags: [],
+    maxAliasCount: 100
+  });
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    const rootType = Array.isArray(parsed) ? 'list' : parsed === null ? 'null' : 'scalar';
+    throw new Error(`frontmatter root must be a mapping, got ${rootType}`);
   }
-  return result;
-}
-
-function unquote(val: string): string {
-  return val.replace(/^['"](.*)['"]$/, '$1');
+  return { frontmatter: parsed as Record<string, unknown>, body };
 }
 
 function deriveSkillName(a: DiscoveredArtifact): string {
