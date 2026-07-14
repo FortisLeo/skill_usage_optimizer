@@ -268,6 +268,22 @@ describe('discover', () => {
     }
   });
 
+  it('indexes explicit generic roots without changing known-system discovery', () => {
+    const { root, ctx, cleanup } = makeTempWorkspace();
+    const explicitRoot = join(root, 'unknown', 'skills');
+    mkdirSync(join(explicitRoot, 'shared'), { recursive: true });
+    writeFileSync(join(explicitRoot, 'shared', 'SKILL.md'), '# Generic');
+    writeFixture(root, '.claude/skills/shared/SKILL.md', '# Claude');
+    ctx.explicitRoots = [explicitRoot];
+    ctx.explicitRootSystem = 'generic';
+    try {
+      const { artifacts, errors } = discover(ctx);
+      expect(errors).toEqual([]);
+      expect(artifacts.some(a => a.system === 'generic' && a.absolutePath === join(explicitRoot, 'shared', 'SKILL.md'))).toBe(true);
+      expect(artifacts.some(a => a.system === 'claude' && a.absolutePath.endsWith('.claude/skills/shared/SKILL.md'))).toBe(true);
+    } finally { cleanup(); }
+  });
+
   it('does not index recursive SKILL.md through symlink escapes', () => {
     const { root, ctx, cleanup } = makeTempWorkspace();
     const outside = mkdtempSync(join(tmpdir(), 'skill-opt-symlink-outside-'));

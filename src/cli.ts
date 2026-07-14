@@ -4,7 +4,7 @@ import { resolve as resolvePath } from 'node:path';
 import { computeHash, readSourceFile, statFile } from './fs/freshness.js';
 import { FileStore } from './store/fileStore.js';
 import { createToolDeps } from './mcp/server.js';
-import { handleDoctor, handleIndexSkills } from './mcp/tools.js';
+import { handleDoctor, handleGetTokenSavingsStats, handleIndexSkills } from './mcp/tools.js';
 import { handleMcpToolCall } from './mcp/server.js';
 import type { ToolDeps } from './mcp/tools.js';
 
@@ -13,12 +13,12 @@ const HELP = `Usage: ruleloom <command> [options]
 Commands:
   index [--system NAME] [--path DIR] [--force]
   search <query> [--phase NAME] [--skill NAME] [--k N] [--json]
-  resolve <query> [--phase NAME] [--skill NAME] [--budget N] [--no-soft] [--json]
+  resolve <query> [--phase NAME] [--skill NAME] [--budget N] [--no-soft] [--session-id ID] [--new-session] [--json]
   get <skill>#<section> [--json]   (maps to load_section)
   get <skill> [--json]             (maps to get_skill_sections)
   doctor [--json]                  (reserved P6 exit contract: 0 clean, 1 warnings, 2 errors)
   watch [--system NAME] [--path DIR]
-  stats [--json]
+  stats [--session-id ID] [--new-session] [--json]
 
 The --json flag selects deterministic JSON output; command handlers are shared with MCP.`;
 
@@ -101,6 +101,8 @@ export function startWatch(deps: ToolDeps, system: string, path: string, delay =
     }, delay);
   };
   const watcher = fsWatch(path, { recursive: true }, schedule);
+  // Scan once so writes made while the platform watcher is registering are not lost.
+  schedule();
   return { close: () => { closed = true; if (timer) clearTimeout(timer); watcher.close(); }, get done() { return running; } };
 }
 
@@ -121,7 +123,7 @@ export async function runCli(argv = process.argv.slice(2), deps?: ToolDeps): Pro
   try {
     if (command === 'index') emit(await call('index_skills', { system: value(args, '--system') ?? 'claude', ...(value(args, '--path') ? { roots: [required(args, '--path')] } : {}), ...(has(args, '--force') ? { force: true } : {}) }));
     else if (command === 'search') emit(await call('search_skill_sections', { query: positional(args)[0] ?? '', ...(value(args, '--phase') ? { phase: value(args, '--phase') } : {}), ...(value(args, '--skill') ? { skill: value(args, '--skill') } : {}), ...(value(args, '--k') ? { k: Number(value(args, '--k')) } : {}) }));
-    else if (command === 'resolve') emit(await call('resolve_task_sections', { query: positional(args)[0] ?? '', ...(value(args, '--phase') ? { phase: value(args, '--phase') } : {}), ...(value(args, '--skill') ? { skill: value(args, '--skill') } : {}), ...(value(args, '--budget') ? { budget: Number(value(args, '--budget')) } : {}), ...(has(args, '--no-soft') ? { includeSoft: false } : {}) }));
+    else if (command === 'resolve') emit(await call('resolve_task_sections', { query: positional(args)[0] ?? '', ...(value(args, '--phase') ? { phase: value(args, '--phase') } : {}), ...(value(args, '--skill') ? { skill: value(args, '--skill') } : {}), ...(value(args, '--budget') ? { budget: Number(value(args, '--budget')) } : {}), ...(has(args, '--no-soft') ? { includeSoft: false } : {}), ...(value(args, '--session-id') ? { sessionId: value(args, '--session-id') } : {}), ...(has(args, '--new-session') ? { newSession: true } : {}) }));
     else if (command === 'get') {
       const ref = positional(args)[0] ?? '';
       const split = ref.indexOf('#');
@@ -136,7 +138,7 @@ export async function runCli(argv = process.argv.slice(2), deps?: ToolDeps): Pro
       emit(JSON.stringify(result));
       return result.status === 'errors' ? 2 : result.status === 'warnings' ? 1 : 0;
     }
-    else if (command === 'stats') console.log(await stats(toolDeps.store));
+    else if (command === 'stats') emit(await handleGetTokenSavingsStats(toolDeps, value(args, '--session-id'), has(args, '--new-session')));
     else if (command === 'watch') {
       const path = resolvePath(value(args, '--path') ?? process.cwd());
       const watch = startWatch(toolDeps, value(args, '--system') ?? 'claude', path);

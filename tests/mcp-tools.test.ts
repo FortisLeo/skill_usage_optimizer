@@ -1,11 +1,14 @@
 // ponytail: MCP tool handler unit tests with stub deps
 import { afterAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, SkillConflictDiagnostic, SkillManifest } from '../src/types.js';
-import type { SkillSection, SkillStore } from '../src/store/fileStore.js';
+import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, SkillConflictDiagnostic, SkillManifest } from '../src/types.js';
+import type { SkillSection } from '../src/store/fileStore.js';
 import { computeHash } from '../src/fs/freshness.js';
+import { discover } from '../src/discovery/index.js';
+import { normalize } from '../src/normalize/index.js';
+import { compile } from '../src/compiler/index.js';
 import type { ToolDeps } from '../src/mcp/tools.js';
 import {
   handleIndexSkills,
@@ -204,6 +207,28 @@ describe('handleIndexSkills', () => {
     expect(seen!.explicitRoots).toEqual(['/plugin/root']);
     expect(seen!.explicitRootSystem).toBe('claude');
     expect(normalized.map(a => a.system)).toEqual(['claude']);
+  });
+
+  it('indexes a generic explicit root with generic manifest IDs', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'mcp-generic-'));
+    const root = join(workspace, 'unknown', 'skills');
+    mkdirSync(join(root, 'demo'), { recursive: true });
+    writeFileSync(join(root, 'demo', 'SKILL.md'), '---\nname: demo\n---\n# Demo\n\nGeneric content.');
+    try {
+      const deps = makeStubDeps({
+        discover,
+        normalize,
+        compile: (inputs, ctx) => {
+          const result = compile(inputs, ctx);
+          return { ...result, store: result.store instanceof Map ? result.store : new Map(Object.entries(result.store)) };
+        },
+        resolveWorkspaceRoot: () => workspace,
+        resolveHomeDir: () => workspace
+      });
+      const parsed = JSON.parse(await handleIndexSkills(deps, 'generic', [root]));
+      expect(parsed.indexedSkills).toBe(1);
+      expect(Object.keys(await deps.store.readManifests())).toEqual([expect.stringMatching(/^generic::demo::/)]);
+    } finally { rmSync(workspace, { recursive: true, force: true }); }
   });
 
   it('preserves other systems when indexing without force', async () => {

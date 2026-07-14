@@ -1,29 +1,67 @@
 # Tool Reference
 
-Ruleloom exposes nine MCP tools. Every tool takes a JSON object, returns a JSON string in the `content` array, and reports errors in the same shape:
+Ruleloom exposes MCP tools. Every tool takes a JSON object, returns a JSON string in the `content` array, and reports errors in the same shape:
 
 ```json
-{ "errors": ["system must be one of: claude, opencode, codex, copilot"] }
+{ "errors": ["system must be one of: claude, opencode, codex, copilot, generic"] }
 ```
 
 A successful call returns the documented payload. A failure returns `{ "errors": [...] }` and the MCP response sets `isError: true`.
 
-The `system` argument, when accepted, is one of: `claude`, `opencode`, `codex`, `copilot`. These match the rule-file conventions each harness ships with.
+The `system` argument, when accepted, is one of: `claude`, `opencode`, `codex`, `copilot`, `generic`. Generic sources are indexed only from explicit roots.
 
 ---
 
-## `index_skills`
+## `discover_skill_folders`
 
-Discover, normalize, and compile rule files for one source system into the local cache. This is the only tool that writes. Call it once per system, or once per session if rule files change.
+Opt-in candidate discovery only. With no arguments it recursively checks the server project root; `scope: "home"` is required to check the home directory. It has no custom path option and does not index, compile, or read skill-file content.
 
 ### Arguments
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot'` | yes | Which system to index. |
-| `roots` | `string[]` | no | Extra absolute paths to treat as rule roots for this system. Default: none. |
+| `scope` | `'project' \| 'home'` | no | Fixed root to scan. Default: `'project'`. Home is never scanned unless explicitly requested. |
+| `maxDepth` | integer `0..10` | no | Directory traversal depth. Default: 5. |
+| `limit` | integer `1..500` | no | Candidate cap. Default: 100; `truncated` is true when reached. |
+
+Project roots include `.claude/skills`, `.claude/commands`, `.opencode/skills`, `.opencode/rules`, `.codex/skills`, `.codex/agents`, `.github/copilot`, and `.github/instructions`. Home roots include `.claude/skills`, `.opencode/skills`, `.config/opencode/skills`, `.codex/skills`, and `.github/copilot`. Project `AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` are also reported as non-indexable instruction files.
+
+The bounded recursive walk additionally finds directories whose basename is exactly `skills`, using case-sensitive matching (`Skills` does not match), and exact `SKILL.md` or `skill.md` packages beneath them. Known roots keep their known system and are not duplicated as generic; unknown harness roots use `generic` with `matchedBy: "skills_directory"`. Discovery scans only the selected project/home tree, not arbitrary files, `/`, or the full machine. It skips `.git`, `node_modules`, `Library`, `Downloads`, `Trash`, `Caches`, `vendor`, `dist`, `build`, `target`, and symbolic links; real paths must remain inside the selected root. Defaults are depth 5, 100 results, and 10,000 scanned entries. `truncated` is true when the result or entry cap is reached.
+
+Every candidate has a valid `system` (`claude`, `opencode`, `codex`, `copilot`, or `generic`) and an `indexable` flag. Only indexable candidates have an absolute `indexRoot`: the parent directory for `skill_file`, or the matched directory for a folder candidate.
+
+```json
+{ "scope": "project", "root": "/repo", "candidates": [{ "path": ".claude/skills/example/SKILL.md", "system": "claude", "indexable": true, "indexRoot": "/repo/.claude/skills/example", "kind": "skill_file", "matchedBy": "SKILL.md" }], "truncated": false }
+```
+
+To index an `indexable` candidate, pass `indexRoot`, not `path`:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "claude", "roots": ["/repo/.claude/skills/example"] } }
+```
+
+Use the candidate's `system`: `claude` for `.claude/*`, `opencode` for `.opencode/*`, `codex` for `.codex/*`, and `copilot` for `.github/copilot` or `.github/instructions`. Root instruction-file entries have no actionable `indexRoot`; index them through normal system discovery instead. Home candidates use their absolute `indexRoot` unchanged.
+
+```json
+{ "name": "discover_skill_folders", "arguments": {} }
+{ "name": "discover_skill_folders", "arguments": { "scope": "home" } }
+{ "name": "index_skills", "arguments": { "system": "generic", "roots": ["/absolute/indexRoot/from/candidate"] } }
+```
+
+---
+
+## `index_skills`
+
+Discover, normalize, and compile rule files for one source system into the local cache. This is the only tool that writes index artifacts; `resolve_task_sections` and `get_token_savings_stats` with `newSession: true` may update `.skill-cache/savings.json`. Call it once per system, or once per session if rule files change.
+
+### Arguments
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot' \| 'generic'` | yes | Which system to index. |
+| `roots` | `string[]` | required for `generic` | Extra absolute paths to treat as rule roots for this system. Generic requires at least one explicit non-empty root and has no automatic roots. |
 | `baseDir` | `string` | no | Workspace root for discovery. Default: server's `cwd`. |
-| `force` | `boolean` | no | Wipe the cache for this system before indexing. Default: false. |
+| `force` | `boolean` | no | Wipe indexed skills for this system before indexing, while preserving local savings metrics. Default: false. |
 
 ### Example input
 
@@ -88,7 +126,7 @@ Enumerate every indexed skill, with summary metadata and conflict counts. No arg
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot'` | no | Restrict the list to one system. |
+| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot' \| 'generic'` | no | Restrict the list to one system. |
 
 ### Example input
 
@@ -401,16 +439,18 @@ Search indexed sections with `query`, optionally limited by `k` and `skill`. Whe
 
 ## `resolve_task_sections`
 
-Resolve task sections and their dependency closure with `query`, optional `skill`, and optional `budget`. When `phase` is supplied, this new tool uses the same deliberate AND filter as `search_skill_sections` before resolving by query. The response keeps the existing `ResolveResult` fields and adds an MCP-only `tokenSavings` envelope with `tokensLoaded`, `tokensWholeFile`, and bounded `savingsPct`; missing or zero canonical denominators are returned as `null`.
+Resolve task sections and their dependency closure with `query`, optional `skill`, and optional `budget`. When `phase` is supplied, this new tool uses the same deliberate AND filter as `search_skill_sections` before resolving by query. The response keeps the existing `ResolveResult` fields and adds an MCP-only `tokenSavings` envelope with `tokensLoaded`, `tokensWholeFile`, and bounded `savingsPct`; missing or zero canonical denominators are returned as `null`. `sessionId` is an optional opaque 1-64 character identifier; `newSession` creates a new persisted active session. They cannot be used together.
 
 ## `doctor`
 
 Returns a read-only diagnostic report: `{ "status": "clean" | "warnings" | "errors", "diagnostics": [] }`.
 Diagnostics cover dependency cycles, missing requirements, trust direction, oversized sections, and safety policy text in shadowed sources. The CLI exits 0, 1, or 2 for clean, warnings, or errors respectively; MCP reports status only.
 
-## `stats`
+## `get_token_savings_stats` and `stats`
 
-Stats includes `usageSignals` aggregated from recent, minimized records. `sessionCorrelation` is `approximate (process-local, 5min window)`: it resets on restart, can conflate concurrent users under shared/HTTP deployment, and is not true session correlation. No query, task text, returned content or IDs, session/user/IP/header data, or error text is persisted.
+`get_token_savings_stats` returns `{ label, lifetime, session, recordCount }`; CLI `stats` returns the same shape. `sessionId` selects an opaque session and `newSession` creates and persists a new active session. Lifetime, active-session, and opaque named-session aggregates survive process restarts in `.skill-cache/savings.json`; only the newest 100 metric records are retained.
+
+The label is `Ruleloom estimated token proxy`: baseline is the indexed whole-skill token estimate and sent is the loaded-section estimate. These are not provider usage, billing, or cost data, and Ruleloom makes no provider API calls. No query/task text, returned content, host user ID, or other user identifier is persisted.
 
 ## Common shapes
 
@@ -465,3 +505,5 @@ The built package also provides the `ruleloom` CLI. `index`, `search`,
 application handlers as MCP. `get skill#section` maps to `load_section`, while
 `get skill` maps to `get_skill_sections`. `--json` produces deterministic JSON.
 The P6 doctor exit contract is reserved: 0 clean, 1 warnings, 2 errors.
+`resolve` accepts `--session-id ID` and `--new-session`; `stats` accepts the
+same options.

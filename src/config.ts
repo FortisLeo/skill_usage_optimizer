@@ -4,14 +4,16 @@ export const DEFAULT_SKILL_DIRS: Record<SourceSystem, string[]> = {
   claude: ['.claude/skills', '.claude/commands'],
   opencode: ['.opencode/skills', '.opencode/rules'],
   codex: ['.codex/skills', '.codex/agents'],
-  copilot: ['.github/copilot', '.github/instructions']
+  copilot: ['.github/copilot', '.github/instructions'],
+  generic: []
 };
 
 export const GLOBAL_SKILL_DIRS: Record<SourceSystem, string[]> = {
   claude: ['.claude/skills'],
   opencode: ['.opencode/skills', '.config/opencode/skills'],
   codex: ['.codex/skills'],
-  copilot: ['.github/copilot']
+  copilot: ['.github/copilot'],
+  generic: []
 };
 
 export const CODEX_SYSTEM_SKILLS_DIR = '/etc/codex/skills';

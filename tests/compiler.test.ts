@@ -388,6 +388,16 @@ describe('compile', () => {
       expect(result.store.size).toBe(2);
     });
 
+    it('keeps generic and known same-name skills isolated with generic IDs', () => {
+      const result = compile([
+        makeInput({ system: 'generic', skillName: 'shared', sourcePath: '/tmp/generic.md', sourceHash: 'aaa11111' }),
+        makeInput({ system: 'claude', skillName: 'shared', sourcePath: '/tmp/claude.md', sourceHash: 'bbb22222' })
+      ], makeCtx());
+      expect(result.errors).toEqual([]);
+      expect(result.diagnostics).toEqual([]);
+      expect(result.manifests!.map(manifest => manifest.id).sort()).toEqual(['claude::shared::bbb22222', 'generic::shared::aaa11111']);
+    });
+
     it('no diagnostics or errors for single input (no conflict possible)', () => {
       const result = compile([makeInput({ skillName: 'solo' })], makeCtx());
       expect(result.errors).toEqual([]);
@@ -412,4 +422,3 @@ describe('compile', () => {
     });
   });
 });
-

@@ -1,6 +1,5 @@
 // ponytail: pure MCP tool handlers with injected pipeline functions
 import { statSync } from 'node:fs';
-import { performance } from 'node:perf_hooks';
 import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, RetrievalRequest, SkillConflictDiagnostic, SkillManifest, SkillStore as TypesSkillStore, ResolveResult } from '../types.js';
 import type { SkillSection } from '../store/fileStore.js';
 import { computeHash, readSourceFile } from '../fs/freshness.js';
@@ -8,6 +7,7 @@ import { extractMarkdownLinks } from '../retrieval/references.js';
 import { searchSections as defaultSearchSections } from '../search/lexical.js';
 import { resolve as defaultResolve } from '../resolver/index.js';
 import { doctor } from '../resolver/doctor.js';
+import { discoverSkillFolders } from '../discovery/candidates.js';
 
 export interface ToolDeps {
   discover: (ctx: DiscoveryContext) => DiscoverResult;
@@ -23,6 +23,8 @@ export interface ToolDeps {
     writeManifests: (manifests: Record<string, SkillManifest>) => Promise<void>;
     readSavings?: () => Promise<unknown>;
     writeSavings?: (records: unknown) => Promise<void>;
+    updateSavings?: (update?: { baselineTokens?: number; sentTokens?: number; savedTokens?: number; sessionId?: string; newSession?: boolean }) => Promise<unknown>;
+    clearIndex?: () => Promise<void>;
     clear: () => Promise<void>;
   };
   resolveHomeDir: () => string;
@@ -31,27 +33,15 @@ export interface ToolDeps {
   resolve?: (store: TypesSkillStore | SkillSection[], request: { query: string; phase?: string; skill?: string; budget?: number; includeSoft?: boolean }) => ResolveResult;
 }
 
-const USAGE_RETENTION = 100;
-let previousInstrumentedAt: number | undefined;
-
-// ponytail: approximate process-local correlation; resets on restart, conflates concurrent users under shared/HTTP deployment, and is not true session correlation.
-function beginInstrumentation(): { startedAt: number; followUp: boolean } {
-  const startedAt = performance.now();
-  const followUp = previousInstrumentedAt !== undefined && startedAt - previousInstrumentedAt <= 300000;
-  previousInstrumentedAt = startedAt;
-  return { startedAt, followUp };
-}
-
-async function persistUsage(deps: ToolDeps, record: Record<string, unknown>): Promise<void> {
+async function persistSavings(deps: ToolDeps, baselineTokens?: number, sentTokens?: number, sessionId?: string, newSession?: boolean): Promise<void> {
   try {
-    if (!deps.store.writeSavings) return;
-    const existing = deps.store.readSavings ? await deps.store.readSavings() : [];
-    const records = Array.isArray(existing)
-      ? existing
-      : (existing && typeof existing === 'object' && Array.isArray((existing as any).records) ? (existing as any).records : []);
-    await deps.store.writeSavings([...records, record].slice(-USAGE_RETENTION));
+    if (deps.store.updateSavings) await deps.store.updateSavings({
+      ...(baselineTokens !== undefined && sentTokens !== undefined ? { baselineTokens, sentTokens, savedTokens: Math.max(baselineTokens - sentTokens, 0) } : {}),
+      sessionId,
+      newSession
+    });
   } catch {
-    // Usage persistence is best effort and must not affect tool behavior.
+    // Metrics must not affect a successful resolve.
   }
 }
 
@@ -172,7 +162,7 @@ export async function handleIndexSkills(
   };
 
   if (force) {
-    await deps.store.clear();
+    if (deps.store.clearIndex) await deps.store.clearIndex(); else await deps.store.clear();
     await deps.store.writeIndex({});
   }
 
@@ -258,6 +248,10 @@ export async function handleIndexSkills(
     ...(conflictCount > 0 ? { conflictCount } : {}),
     ...(ci.diagnostics && ci.diagnostics.length > 0 ? { diagnostics: ci.diagnostics } : {})
   });
+}
+
+export async function handleDiscoverSkillFolders(deps: ToolDeps, scope: 'project' | 'home', maxDepth?: number, limit?: number): Promise<string> {
+  return jsonResult(discoverSkillFolders(scope === 'home' ? deps.resolveHomeDir() : deps.resolveWorkspaceRoot(), scope, maxDepth, limit));
 }
 
 export async function handleListSkills(
@@ -352,7 +346,6 @@ export async function handleGetSkillManifest(
 
   if (manifest) {
     // ponytail: liveness check uses exact manifest section IDs, not loose prefix scan
-    const allSectionIds = Object.keys(index);
     const manifestSectionIds = manifest.sections.map(s => s.id);
     const matchingIds = manifestSectionIds.filter(id => id in index);
     if (matchingIds.length === 0) {
@@ -574,28 +567,12 @@ export async function handleLoadSection(
 }
 
 export async function handleSearchSkillSections(deps: ToolDeps, query: string, phase?: string, skill?: string, k?: number): Promise<string> {
-  const instrumentation = beginInstrumentation();
-  let success = false;
-  try {
-    const result = await querySections(deps, query, phase, skill);
-    if (result.error) return jsonResult({ errors: [result.error] });
-    success = true;
-    return jsonResult({ query, sections: result.sections!.slice(0, k ?? 10), count: Math.min(result.sections!.length, k ?? 10) });
-  } finally {
-    await persistUsage(deps, {
-      timestamp: new Date().toISOString(), handler: 'search_skill_sections',
-      latencyMs: performance.now() - instrumentation.startedAt, success, followUp: instrumentation.followUp
-    });
-  }
+  const result = await querySections(deps, query, phase, skill);
+  if (result.error) return jsonResult({ errors: [result.error] });
+  return jsonResult({ query, sections: result.sections!.slice(0, k ?? 10), count: Math.min(result.sections!.length, k ?? 10) });
 }
 
-export async function handleResolveTaskSections(deps: ToolDeps, query: string, phase?: string, skill?: string, budget?: number, includeSoft?: boolean): Promise<string> {
-  const instrumentation = beginInstrumentation();
-  let success = false;
-  let usageSavings: ReturnType<typeof tokenSavings> | undefined;
-  let usageCollapsed: boolean | undefined;
-  let usageMulti: boolean | undefined;
-  try {
+export async function handleResolveTaskSections(deps: ToolDeps, query: string, phase?: string, skill?: string, budget?: number, includeSoft?: boolean, sessionId?: string, newSession?: boolean): Promise<string> {
     const scoped = await sectionCandidates(deps, undefined, skill);
     if (scoped.error) return jsonResult({ errors: [scoped.error] });
     const found = await sectionCandidates(deps, phase);
@@ -605,18 +582,24 @@ export async function handleResolveTaskSections(deps: ToolDeps, query: string, p
     const result = resolver(sections, { query, skill, budget, ...(includeSoft === undefined ? {} : { includeSoft }) });
     const manifests = await deps.store.readManifests();
     const savings = tokenSavings(result, sections, manifests);
-    usageSavings = savings;
-    usageCollapsed = result.collapsed;
-    usageMulti = result.sections.length > 1;
-    success = true;
+    if (savings.tokensWholeFile !== null || newSession) await persistSavings(deps, savings.tokensWholeFile ?? undefined, savings.tokensWholeFile === null ? undefined : savings.tokensLoaded, sessionId, newSession);
     return jsonResult({ ...result, tokenSavings: savings });
-  } finally {
-    await persistUsage(deps, {
-      timestamp: new Date().toISOString(), handler: 'resolve_task_sections',
-      latencyMs: performance.now() - instrumentation.startedAt, success, followUp: instrumentation.followUp,
-      ...(usageSavings ? { tokenSavings: usageSavings, collapsed: usageCollapsed, multi: usageMulti } : {})
-    });
-  }
+}
+
+export async function handleGetTokenSavingsStats(deps: ToolDeps, sessionId?: string, newSession?: boolean): Promise<string> {
+  try {
+    const data = newSession && deps.store.updateSavings
+      ? await deps.store.updateSavings({ newSession: true })
+      : deps.store.readSavings
+        ? await deps.store.readSavings()
+        : await deps.store.updateSavings?.({ sessionId, newSession });
+    const envelope = data && typeof data === 'object' ? data as Record<string, any> : {};
+    const empty = { calls: 0, baselineTokens: 0, sentTokens: 0, savedTokens: 0, reductionPct: 0 };
+    const session = sessionId
+      ? { id: sessionId, ...(envelope.sessionTotals?.[sessionId] ?? (envelope.activeSession?.id === sessionId ? envelope.activeSession : empty)) }
+      : envelope.activeSession ?? { id: null, ...empty };
+    return jsonResult({ label: 'Ruleloom estimated token proxy', lifetime: envelope.lifetime ?? empty, session, recordCount: Array.isArray(envelope.records) ? envelope.records.length : 0 });
+  } catch (err) { return jsonResult({ errors: [err instanceof Error ? err.message : String(err)] }); }
 }
 
 export async function handleDoctor(deps: ToolDeps): Promise<string> {
