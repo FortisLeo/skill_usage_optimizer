@@ -1,10 +1,13 @@
 // ponytail: MCP tool handler unit tests with stub deps
 import { afterAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
-import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, SkillConflictDiagnostic, SkillManifest } from '../src/types.js';
-import type { SkillSection } from '../src/store/fileStore.js';
+import type { DiscoveredArtifact, DiscoveryContext, DiscoveryDiagnostic, NormalizedSkillInput, SkillConflictDiagnostic, SkillManifest } from '../src/types.js';
+import { FileStore, type SkillSection } from '../src/store/fileStore.js';
 import { computeHash } from '../src/fs/freshness.js';
 import { discover } from '../src/discovery/index.js';
 import { normalize } from '../src/normalize/index.js';
@@ -16,10 +19,13 @@ import {
   handleGetSkillManifest,
   handleGetSkillSections,
   handleLoadSkillContext,
-  handleLoadSection
+  handleLoadSection,
+  handleSearchSkillSections,
+  handleResolveTaskSections
 } from '../src/mcp/tools.js';
 
 const tempFiles = mkdtempSync(join(tmpdir(), 'mcp-tools-'));
+const execFileAsync = promisify(execFile);
 afterAll(() => rmSync(tempFiles, { recursive: true, force: true }));
 
 function makeSection(id: string, content: string, hash?: string, system: SkillSection['system'] = 'claude', manifestId?: string): SkillSection {
@@ -31,6 +37,15 @@ function makeSection(id: string, content: string, hash?: string, system: SkillSe
 
 function makeArtifact(system: DiscoveredArtifact['system'], absolutePath = `/tmp/${system}.md`): DiscoveredArtifact {
   return { system, kind: 'instruction_file', absolutePath, relativePath: absolutePath, rootOrigin: '/tmp', precedence: 80, configIndirection: null, rawStat: { mtimeMs: 1, size: 2 } };
+}
+
+function makeManifest(id: string, section: SkillSection, system: SkillManifest['system'] = 'claude'): SkillManifest {
+  return {
+    id, skillName: id, system, kind: 'instruction_file', description: null,
+    sourcePath: section.sourcePath!, sourceHash: section.sourceHash!,
+    sections: [{ id: section.id, title: section.title, class: 'always', tokenCount: 1, byteLength: section.content.length, references: [], order: 0 }],
+    tokenCount: 1, byteLength: section.content.length
+  };
 }
 
 function makeStoreDeps(initialIndex?: Record<string, string>, initialSections?: SkillSection[], initialManifests?: Record<string, SkillManifest>) {
@@ -76,6 +91,13 @@ function makeStubDeps(overrides?: Partial<ToolDeps>): ToolDeps {
 }
 
 describe('handleIndexSkills', () => {
+  const discoveryDiagnostic: DiscoveryDiagnostic = {
+    environment: 'claude', capability: 'roots', sourceType: 'explicit', status: 'limited',
+    code: 'SOURCE_UNSAFE', foundCount: 1, skippedCount: 1,
+    limitation: 'Unsafe entries were skipped.',
+    explicitRootGuidance: 'Pass trusted directories in index_skills.roots.'
+  };
+
   it('indexes with no artifacts', async () => {
     const deps = makeStubDeps();
     const result = await handleIndexSkills(deps, 'claude');
@@ -113,13 +135,317 @@ describe('handleIndexSkills', () => {
     expect(parsed.errors[0]).toContain('test error');
   });
 
-  it('clears store on force', async () => {
+  it('requested adapter failure preserves live records without writes', async () => {
+    const old = makeSection('old', '# Old', 'old-hash', 'claude', 'old-manifest');
+    const manifest = makeManifest('old-manifest', old);
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old], { [manifest.id]: manifest });
+    let writes = 0;
+    store.writeSections = async () => { writes++; };
+    store.writeManifests = async () => { writes++; };
+    store.writeIndex = async () => { writes++; };
     const deps = makeStubDeps({
-      store: makeStoreDeps({ 'old': 'zzz' }, [makeSection('old', '# Old')])
+      store,
+      discover: () => ({ artifacts: [], errors: [{ path: 'discover:claude', error: 'adapter failed' }] })
+    });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors).toEqual(['discover:claude: adapter failed']);
+    expect(writes).toBe(0);
+    expect(await store.readIndex()).toEqual({ [old.id]: old.hash });
+    expect(await store.readManifests()).toEqual({ [manifest.id]: manifest });
+  });
+
+  it('force replaces target without early clear', async () => {
+    const events: string[] = [];
+    const old = makeSection('old', '# Old');
+    const baseStore = makeStoreDeps({ old: old.hash }, [old]);
+    baseStore.clear = async () => { events.push('clear'); };
+    const store = { ...baseStore, withIndexLock: async <T>(action: () => Promise<T>) => { events.push('lock'); return action(); } };
+    const deps = makeStubDeps({
+      store,
+      compile: () => { events.push('compile'); return { store: new Map(), errors: [] }; }
     });
     await handleIndexSkills(deps, 'claude', undefined, undefined, true);
     const idx = await deps.store.readIndex();
     expect(idx['old']).toBeUndefined();
+    expect(events).toEqual(['compile', 'lock']);
+  });
+
+  it('force compile failure preserves prior live files', async () => {
+    const old = makeSection('old', '# Old', 'old-hash');
+    const oldManifest = makeManifest('old-manifest', old);
+    const store = makeStoreDeps({ old: old.hash }, [old], { [oldManifest.id]: oldManifest });
+    const deps = makeStubDeps({
+      store,
+      compile: () => ({ store: new Map(), errors: [{ path: 'compile', error: 'broken' }] })
+    });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude', undefined, undefined, true)).errors).toEqual(['compile: broken']);
+    expect(await store.readIndex()).toEqual({ old: old.hash });
+    expect(await store.readSections(['old'])).toEqual(new Map([['old', old]]));
+    expect(await store.readManifests()).toEqual({ [oldManifest.id]: oldManifest });
+  });
+
+  it('force write failure restores prior requested-system records', async () => {
+    const old = makeSection('old', '# Same', 'same-hash', 'claude', 'same-manifest');
+    const incoming = { ...old, mtimeMs: old.mtimeMs! + 1 };
+    const manifest = makeManifest('same-manifest', old);
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old], { [manifest.id]: manifest });
+    store.writeIndex = async () => { throw new Error('index write failed'); };
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [], manifests: [manifest] }) });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude', undefined, undefined, true)).errors[0]).toContain('index write failed');
+    expect(await store.readIndex()).toEqual({ [old.id]: old.hash });
+    expect(await store.readSections([old.id])).toEqual(new Map([[old.id, old]]));
+    expect(await store.readManifests()).toEqual({ [manifest.id]: manifest });
+  });
+
+  it('reuses identical records normally and rewrites them with force without changing live state', async () => {
+    const incoming = makeSection('same', '# Same', 'same-hash', 'claude', 'same-manifest');
+    const other = makeSection('other', '# Other', 'other-hash', 'opencode', 'other-manifest');
+    const incomingManifest = makeManifest('same-manifest', incoming);
+    const otherManifest = makeManifest('other-manifest', other, 'opencode');
+    const run = async (force: boolean) => {
+      const store = makeStoreDeps(
+        { [incoming.id]: incoming.hash, [other.id]: other.hash },
+        [incoming, other],
+        { [incomingManifest.id]: incomingManifest, [otherManifest.id]: otherManifest }
+      );
+      const writes: SkillSection[][] = [];
+      const writeSections = store.writeSections;
+      store.writeSections = async sections => { writes.push([...sections.values()]); await writeSections(sections); };
+      const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [], manifests: [incomingManifest] }) });
+      expect(JSON.parse(await handleIndexSkills(deps, 'claude', undefined, undefined, force)).errors).toEqual([]);
+      return { writes, index: await store.readIndex(), sections: await store.readSections([incoming.id, other.id]), manifests: await store.readManifests() };
+    };
+
+    const ordinary = await run(false);
+    const forced = await run(true);
+    expect(ordinary.writes).toEqual([[]]);
+    expect(forced.writes).toEqual([[incoming]]);
+    expect(forced.index).toEqual(ordinary.index);
+    expect(forced.sections).toEqual(ordinary.sections);
+    expect(forced.manifests).toEqual(ordinary.manifests);
+    expect(forced.sections.get(other.id)).toEqual(other);
+    expect(forced.manifests[otherManifest.id]).toEqual(otherManifest);
+  });
+
+  it('force replaces only the requested system', async () => {
+    const oldTarget = makeSection('old-target', '# Old', 'old-target-hash', 'claude', 'old-target-manifest');
+    const other = makeSection('other', '# Other', 'other-hash', 'opencode', 'other-manifest');
+    const incoming = makeSection('new-target', '# New', 'new-target-hash', 'claude', 'new-target-manifest');
+    const otherManifest = makeManifest('other-manifest', other, 'opencode');
+    const incomingManifest = makeManifest('new-target-manifest', incoming);
+    const store = makeStoreDeps(
+      { [oldTarget.id]: oldTarget.hash, [other.id]: other.hash },
+      [oldTarget, other],
+      { 'old-target-manifest': makeManifest('old-target-manifest', oldTarget), [otherManifest.id]: otherManifest }
+    );
+    const deps = makeStubDeps({
+      store,
+      compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [], manifests: [incomingManifest] })
+    });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude', undefined, undefined, true)).errors).toEqual([]);
+    expect(await store.readIndex()).toEqual({ [other.id]: other.hash, [incoming.id]: incoming.hash });
+    expect(await store.readManifests()).toEqual({ [otherManifest.id]: otherManifest, [incomingManifest.id]: incomingManifest });
+  });
+
+  it('normalization failure performs no writes', async () => {
+    const store = makeStoreDeps({ old: 'old-hash' });
+    let writes = 0;
+    store.writeSections = async () => { writes++; };
+    store.writeManifests = async () => { writes++; };
+    store.writeIndex = async () => { writes++; };
+    const deps = makeStubDeps({
+      store,
+      normalize: () => ({ inputs: [], errors: [{ path: 'normalize', error: 'broken' }] })
+    });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors).toEqual(['normalize: broken']);
+    expect(writes).toBe(0);
+    expect(await store.readIndex()).toEqual({ old: 'old-hash' });
+  });
+
+  it('section collision aborts before live switch', async () => {
+    const old = makeSection('shared-id', '# Old', 'old-hash', 'opencode');
+    const incoming = makeSection('shared-id', '# New', 'new-hash', 'claude');
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old]);
+    let writes = 0;
+    store.writeSections = async () => { writes++; };
+    store.writeManifests = async () => { writes++; };
+    store.writeIndex = async () => { writes++; };
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [] }) });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors[0]).toContain('section ID collision');
+    expect(writes).toBe(0);
+    expect(await store.readIndex()).toEqual({ [old.id]: old.hash });
+  });
+
+  it('refreshes harmless section metadata instead of reusing the stale physical record', async () => {
+    const old = makeSection('refresh', '# Same', 'same-hash', 'claude');
+    const incoming = { ...old, mtimeMs: old.mtimeMs! + 1, precedence: 100 };
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old]);
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [] }) });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors).toEqual([]);
+    expect((await store.readSections([incoming.id])).get(incoming.id)).toEqual(incoming);
+  });
+
+  it('manifest ID collision aborts before any writes or live switch', async () => {
+    const old = makeSection('shared-section', '# Same', 'same-hash', 'claude', 'shared-manifest');
+    const incoming = makeSection('shared-section', '# Same', 'same-hash', 'claude', 'shared-manifest');
+    const oldManifest = { ...makeManifest('shared-manifest', old), sourceHash: '12345678-old' };
+    const incomingManifest = { ...makeManifest('shared-manifest', incoming), sourceHash: '12345678-new' };
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old], { [oldManifest.id]: oldManifest });
+    let writes = 0;
+    store.writeSections = async () => { writes++; };
+    store.writeManifests = async () => { writes++; };
+    store.writeIndex = async () => { writes++; };
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [], manifests: [incomingManifest] }) });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors[0]).toContain('manifest ID collision');
+    expect(writes).toBe(0);
+    expect(await store.readIndex()).toEqual({ [old.id]: old.hash });
+  });
+
+  it('accepts a canonical source path alias for the same manifest identity', async () => {
+    const old = makeSection('alias-section', '# Same', 'same-hash', 'claude', 'alias-manifest');
+    const alias = join(tempFiles, `source-alias-${Math.random()}.md`);
+    symlinkSync(old.sourcePath!, alias);
+    const incoming = { ...old, sourcePath: alias };
+    const oldManifest = makeManifest('alias-manifest', old);
+    const incomingManifest = { ...oldManifest, sourcePath: alias };
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old], { [oldManifest.id]: oldManifest });
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [], manifests: [incomingManifest] }) });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors).toEqual([]);
+    expect((await store.readSections([incoming.id])).get(incoming.id)?.sourcePath).toBe(alias);
+  });
+
+  it.each([
+    ['provenance', (manifest: SkillManifest) => ({ ...manifest, sourceHash: manifest.sourceHash + '-changed' })],
+    ['section references', (manifest: SkillManifest) => ({ ...manifest, sections: [{ ...manifest.sections[0]!, id: 'different-section' }] })]
+  ] as const)('rejects manifest %s mismatch before writes', async (_label, change) => {
+    const old = makeSection('manifest-section', '# Same', 'same-hash', 'claude', 'shared-manifest');
+    const oldManifest = makeManifest('shared-manifest', old);
+    const incomingManifest = change(makeManifest('shared-manifest', old));
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old], { [oldManifest.id]: oldManifest });
+    let writes = 0;
+    store.writeSections = async () => { writes++; };
+    store.writeManifests = async () => { writes++; };
+    store.writeIndex = async () => { writes++; };
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[old.id, old]]), errors: [], manifests: [incomingManifest] }) });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors[0]).toContain('manifest ID collision');
+    expect(writes).toBe(0);
+  });
+
+  it('stages merged manifests before switching index and cleans stale manifests afterward', async () => {
+    const old = makeSection('old-section', '# Old', 'old-hash', 'claude', 'old-manifest');
+    const other = makeSection('other-section', '# Other', 'other-hash', 'opencode', 'other-manifest');
+    const incoming = makeSection('new-section', '# New', 'new-hash', 'claude', 'new-manifest');
+    const oldManifest = makeManifest('old-manifest', old);
+    const otherManifest = makeManifest('other-manifest', other, 'opencode');
+    const incomingManifest = makeManifest('new-manifest', incoming);
+    const store = makeStoreDeps({ [old.id]: old.hash, [other.id]: other.hash }, [old, other], { [oldManifest.id]: oldManifest, [otherManifest.id]: otherManifest });
+    const events: string[] = [];
+    const writeSections = store.writeSections;
+    const writeManifests = store.writeManifests;
+    const writeIndex = store.writeIndex;
+    store.writeSections = async sections => { events.push('sections'); await writeSections(sections); };
+    store.writeManifests = async manifests => { events.push(`manifests:${Object.keys(manifests).sort().join(',')}`); await writeManifests(manifests); };
+    store.writeIndex = async index => { events.push(`index:${Object.keys(index).sort().join(',')}`); await writeIndex(index); };
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [], manifests: [incomingManifest] }) });
+
+    await handleIndexSkills(deps, 'claude');
+    expect(events).toEqual([
+      'sections',
+      'manifests:new-manifest,old-manifest,other-manifest',
+      'index:new-section,other-section',
+      'manifests:new-manifest,other-manifest'
+    ]);
+  });
+
+  it('pre-switch write failure leaves the prior index authoritative', async () => {
+    const old = makeSection('old', '# Old', 'old-hash', 'opencode');
+    const incoming = makeSection('new', '# New', 'new-hash', 'claude');
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old]);
+    store.writeSections = async () => { throw new Error('disk full'); };
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [] }) });
+
+    expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors[0]).toContain('disk full');
+    expect(await store.readIndex()).toEqual({ [old.id]: old.hash });
+  });
+
+  it('post-switch stale-manifest cleanup failure leaves new index readable', async () => {
+    const old = makeSection('old', '# Old', 'old-hash', 'claude', 'old-manifest');
+    const incoming = makeSection('new', '# New', 'new-hash', 'claude', 'new-manifest');
+    const oldManifest = makeManifest('old-manifest', old);
+    const incomingManifest = makeManifest('new-manifest', incoming);
+    const store = makeStoreDeps({ [old.id]: old.hash }, [old], { [oldManifest.id]: oldManifest });
+    const writeManifests = store.writeManifests;
+    let manifestWrites = 0;
+    store.writeManifests = async manifests => {
+      manifestWrites++;
+      if (manifestWrites === 2) throw new Error('cleanup failed');
+      await writeManifests(manifests);
+    };
+    const deps = makeStubDeps({ store, compile: () => ({ store: new Map([[incoming.id, incoming]]), errors: [], manifests: [incomingManifest] }) });
+
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.errors).toEqual(['stale manifest cleanup failed: cleanup failed']);
+    expect(await store.readIndex()).toEqual({ [incoming.id]: incoming.hash });
+    expect((await store.readSections([incoming.id])).get(incoming.id)).toEqual(incoming);
+  });
+
+  it('index lock acquisition times out before writes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-index-lock-'));
+    const store = new FileStore(dir);
+    try {
+      await store.writeIndex({ old: 'old-hash' });
+      writeFileSync(join(dir, '.index.lock'), JSON.stringify({ token: 'live', pid: process.pid, createdAt: Date.now() }));
+      const deps = makeStubDeps({ store });
+
+      expect(JSON.parse(await handleIndexSkills(deps, 'claude')).errors).toEqual(['index: index lock timed out']);
+      expect(await store.readIndex()).toEqual({ old: 'old-hash' });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('concurrent different-system indexing preserves both updates', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-index-processes-'));
+    const toolsUrl = pathToFileURL(resolve('dist/mcp/tools.js')).href;
+    const storeUrl = pathToFileURL(resolve('dist/store/fileStore.js')).href;
+    const script = `
+      import { existsSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      import { FileStore } from ${JSON.stringify(storeUrl)};
+      import { handleIndexSkills } from ${JSON.stringify(toolsUrl)};
+      const dir = process.env.STORE_DIR;
+      const system = process.env.SYSTEM;
+      const other = system === 'claude' ? 'opencode' : 'claude';
+      const store = new FileStore(dir);
+      await store.init();
+      const section = { id: system + '-section', title: system, content: '# ' + system, hash: system + '-hash', system };
+      const deps = {
+        discover: () => {
+          writeFileSync(join(dir, 'ready-' + system), '');
+          while (!existsSync(join(dir, 'ready-' + other))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+          return { artifacts: [], errors: [] };
+        },
+        normalize: () => ({ inputs: [], errors: [] }),
+        compile: () => ({ store: new Map([[section.id, section]]), errors: [] }),
+        loadContext: () => ({ sections: [], context: '' }),
+        store,
+        resolveHomeDir: () => dir,
+        resolveWorkspaceRoot: () => dir
+      };
+      const result = JSON.parse(await handleIndexSkills(deps, system));
+      if (result.errors?.length) throw new Error(result.errors.join(', '));
+    `;
+    try {
+      await Promise.all(['claude', 'opencode'].map(system => execFileAsync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, STORE_DIR: dir, SYSTEM: system }, timeout: 10_000 })));
+      expect(await new FileStore(dir).readIndex()).toEqual({ 'claude-section': 'claude-hash', 'opencode-section': 'opencode-hash' });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('persists compile manifests during indexing', async () => {
@@ -229,6 +555,24 @@ describe('handleIndexSkills', () => {
       expect(parsed.indexedSkills).toBe(1);
       expect(Object.keys(await deps.store.readManifests())).toEqual([expect.stringMatching(/^generic::demo::/)]);
     } finally { rmSync(workspace, { recursive: true, force: true }); }
+  });
+
+  it('indexes ancestor instructions from a nested Git workspace', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'mcp-nested-repo-'));
+    const workspace = join(repo, 'packages', 'app');
+    const home = join(repo, 'home');
+    const store = new FileStore(join(repo, 'store'));
+    mkdirSync(join(repo, '.git'));
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(home);
+    writeFileSync(join(repo, 'AGENTS.md'), '# Repository instructions\n\nUse the ancestor configuration.');
+    await store.init();
+    try {
+      const deps = makeStubDeps({ discover, normalize, compile, store, resolveWorkspaceRoot: () => workspace, resolveHomeDir: () => home });
+      const parsed = JSON.parse(await handleIndexSkills(deps, 'codex'));
+      expect(parsed.errors).toEqual([]);
+      expect(Object.values(await store.readManifests()).some(manifest => manifest.sourcePath === join(repo, 'AGENTS.md'))).toBe(true);
+    } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 
   it('preserves other systems when indexing without force', async () => {
@@ -441,6 +785,109 @@ describe('handleIndexSkills', () => {
     const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
     expect(parsed.conflictCount).toBeUndefined();
     expect(parsed.diagnostics).toBeUndefined();
+  });
+
+  it('keeps nonfatal discovery diagnostics separate from compiler diagnostics', async () => {
+    const section = makeSection('diagnosed', '# Diagnosed');
+    const compilerDiagnostic: SkillConflictDiagnostic = {
+      conflictKey: 'claude::diagnosed',
+      winner: { system: 'claude', sourcePath: '/winner.md', sourceHash: 'winner' },
+      shadowed: [], reason: 'same_precedence_tiebreak', winnerPrecedence: 80
+    };
+    const deps = makeStubDeps({
+      discover: () => ({ artifacts: [], errors: [], discoveryDiagnostics: [discoveryDiagnostic] }),
+      compile: () => ({ store: new Map([[section.id, section]]), errors: [], diagnostics: [compilerDiagnostic] })
+    });
+
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.indexedSections).toBe(1);
+    expect(parsed.discoveryDiagnostics).toEqual([discoveryDiagnostic]);
+    expect(parsed.diagnostics).toEqual([compilerDiagnostic]);
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it('does not persist discovery diagnostics', async () => {
+    const persisted: unknown[] = [];
+    const store = makeStoreDeps();
+    const writeSections = store.writeSections;
+    const writeManifests = store.writeManifests;
+    const writeIndex = store.writeIndex;
+    store.writeSections = async value => { persisted.push([...value.values()]); await writeSections(value); };
+    store.writeManifests = async value => { persisted.push(value); await writeManifests(value); };
+    store.writeIndex = async value => { persisted.push(value); await writeIndex(value); };
+    const deps = makeStubDeps({
+      store,
+      discover: () => ({ artifacts: [], errors: [], discoveryDiagnostics: [discoveryDiagnostic] })
+    });
+
+    const parsed = JSON.parse(await handleIndexSkills(deps, 'claude'));
+    expect(parsed.discoveryDiagnostics).toEqual([discoveryDiagnostic]);
+    expect(JSON.stringify(persisted)).not.toContain('discoveryDiagnostics');
+    expect(JSON.stringify(persisted)).not.toContain(discoveryDiagnostic.limitation);
+  });
+
+  it('invalid explicit root remains fatal before persistence', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'mcp-fatal-explicit-'));
+    const store = makeStoreDeps();
+    let writes = 0;
+    store.writeSections = async () => { writes++; };
+    store.writeManifests = async () => { writes++; };
+    store.writeIndex = async () => { writes++; };
+    const deps = makeStubDeps({
+      store,
+      discover,
+      resolveWorkspaceRoot: () => workspace,
+      resolveHomeDir: () => workspace
+    });
+    try {
+      const missing = join(workspace, 'missing-explicit-root');
+      const parsed = JSON.parse(await handleIndexSkills(deps, 'claude', [missing]));
+      expect(parsed.errors[0]).toContain('explicit root does not exist');
+      expect(parsed.indexedSkills).toBeUndefined();
+      expect(writes).toBe(0);
+    } finally { rmSync(workspace, { recursive: true, force: true }); }
+  });
+});
+
+describe('section retrieval freshness', () => {
+  it('search_skill_sections requires rebuild without disclosing stale content', async () => {
+    const section = makeSection('search-stale', 'cached search secret');
+    writeFileSync(section.sourcePath!, 'changed same length!');
+    const deps = makeStubDeps({ store: makeStoreDeps({ [section.id]: section.hash }, [section]) });
+
+    const parsed = JSON.parse(await handleSearchSkillSections(deps, 'secret'));
+    expect(parsed.rebuildRequired.code).toBe('REBUILD_REQUIRED');
+    expect(parsed).not.toHaveProperty('sections');
+    expect(JSON.stringify(parsed)).not.toContain(section.content);
+  });
+
+  it('resolve_task_sections requires rebuild without disclosing stale content', async () => {
+    const section = makeSection('resolve-stale', 'cached resolve secret');
+    writeFileSync(section.sourcePath!, 'changed same length!!');
+    const deps = makeStubDeps({ store: makeStoreDeps({ [section.id]: section.hash }, [section]) });
+
+    const parsed = JSON.parse(await handleResolveTaskSections(deps, 'secret'));
+    expect(parsed.rebuildRequired.code).toBe('REBUILD_REQUIRED');
+    expect(parsed).not.toHaveProperty('sections');
+    expect(JSON.stringify(parsed)).not.toContain(section.content);
+  });
+
+  it('treats identical content with a changed timestamp as fresh', async () => {
+    const section = makeSection('timestamp-fresh', '# unchanged');
+    utimesSync(section.sourcePath!, new Date(), new Date(Date.now() + 10_000));
+    const parsed = JSON.parse(await handleSearchSkillSections(makeStubDeps({ store: makeStoreDeps({ [section.id]: section.hash }, [section]) }), 'unchanged'));
+    expect(parsed.freshness).toBeUndefined();
+    expect(parsed.sections).toBeDefined();
+  });
+
+  it('detects same-size content changes even when mtime is restored', async () => {
+    const section = makeSection('hash-stale', 'alpha');
+    const original = statSync(section.sourcePath!);
+    writeFileSync(section.sourcePath!, 'bravo');
+    utimesSync(section.sourcePath!, original.atime, original.mtime);
+    const parsed = JSON.parse(await handleSearchSkillSections(makeStubDeps({ store: makeStoreDeps({ [section.id]: section.hash }, [section]) }), 'alpha'));
+    expect(parsed.freshness).toBe('stale');
+    expect(parsed).not.toHaveProperty('sections');
   });
 });
 
@@ -686,7 +1133,7 @@ describe('handleListSkills', () => {
     expect(parsed.skills[0].tokenCount).toBe(3);
   });
 
-  it('returns stale load_skill_context fallback content with structured rebuildRequired', async () => {
+  it('returns bounded stale metadata without changed source content', async () => {
     const section = makeSection('skill-1', '# Hello', 'h1', 'claude', 'skill-1');
     writeFileSync(section.sourcePath!, '# Changed', 'utf-8');
     section.mtimeMs = 0;
@@ -694,7 +1141,7 @@ describe('handleListSkills', () => {
     const deps = makeStubDeps({ store: makeStoreDeps({ 'skill-1': 'h1' }, [section]) });
     const parsed = JSON.parse(await handleLoadSkillContext(deps));
     expect(parsed.freshness).toBe('stale');
-    expect(parsed.content).toBe('# Changed');
+    expect(parsed).not.toHaveProperty('content');
     expect(parsed.rebuildRequired).toBeDefined();
     expect(parsed.rebuildRequired.code).toBe('REBUILD_REQUIRED');
     expect(parsed.rebuildRequired.action).toBe('index_skills');
@@ -1164,7 +1611,7 @@ describe('handleGetSkillSections', () => {
     expect(parsed.sections.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('returns stale load_section fallback content with structured rebuildRequired', async () => {
+  it('returns stale load_section metadata without changed source content', async () => {
     const section = makeSection('skill-1', '# Hello', 'h1', 'claude', 'skill-1');
     writeFileSync(section.sourcePath!, '# Changed', 'utf-8');
     section.mtimeMs = 0;
@@ -1172,7 +1619,7 @@ describe('handleGetSkillSections', () => {
     const deps = makeStubDeps({ store: makeStoreDeps({ 'skill-1': 'h1' }, [section]) });
     const parsed = JSON.parse(await handleLoadSection(deps, 'skill-1'));
     expect(parsed.freshness).toBe('stale');
-    expect(parsed.content).toBe('# Changed');
+    expect(parsed).not.toHaveProperty('content');
     expect(parsed.rebuildRequired).toBeDefined();
     expect(parsed.rebuildRequired.code).toBe('REBUILD_REQUIRED');
     expect(parsed.rebuildRequired.action).toBe('index_skills');
@@ -1180,12 +1627,13 @@ describe('handleGetSkillSections', () => {
     expect(parsed.rebuildRequired.reason).toBe('source_changed');
   });
 
-  it('accepts changed mtime when content hash is unchanged', async () => {
+  it('does not require a rebuild when only source metadata changes', async () => {
     const section = makeSection('skill-1', '# Hello', 'h1', 'claude', 'skill-1');
     section.mtimeMs = 0;
     const deps = makeStubDeps({ store: makeStoreDeps({ 'skill-1': 'h1' }, [section]) });
     const parsed = JSON.parse(await handleGetSkillSections(deps, 'skill-1'));
-    expect(parsed.sections[0].id).toBe('skill-1');
+    expect(parsed.rebuildRequired).toBeUndefined();
+    expect(parsed.sections).toBeDefined();
   });
 
   it('returns sections matching by manifestId when skillId is not a section ID', async () => {

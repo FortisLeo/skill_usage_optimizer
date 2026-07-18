@@ -39,6 +39,8 @@ Replace `/absolute/path/to/ruleloom` with the real path on your machine. Use for
 
 The server registers as `skill-usage-optimizer` over MCP. That name is internal and does not need to match the JSON key your harness uses for the server spec. Pick any key you like for the `mcpServers` object.
 
+Supported indexing systems are `claude`, `opencode`, `codex`, `copilot`, `cursor`, `gemini`, `windsurf`, `cline`, `roo`, `continue`, `aider`, and explicit-root-only `generic`.
+
 ## Claude Code (CLI)
 
 Drop a project-scoped `.mcp.json` at the repo root, or a user-scoped config in your Claude Code config directory.
@@ -93,7 +95,7 @@ codex mcp add ruleloom -- node /Users/me/code/ruleloom/dist/index.js
 
 ## OpenCode
 
-OpenCode reads `opencode.json` (or `~/.config/opencode/config.json` for global). Add an `mcp` block:
+OpenCode reads project `opencode.json` or global `~/.config/opencode/opencode.json`. Add an `mcp` block:
 
 ```json
 {
@@ -106,7 +108,7 @@ OpenCode reads `opencode.json` (or `~/.config/opencode/config.json` for global).
 }
 ```
 
-OpenCode accepts both the array form above and a single `command` string. The array form is safer because it does not require shell parsing of spaces in paths.
+OpenCode's local MCP object requires the command array shown above.
 
 ## VS Code and Copilot Chat
 

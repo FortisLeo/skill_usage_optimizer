@@ -1,0 +1,3 @@
+name = "global"
+description = "Global fixture"
+developer_instructions = "Use global review defaults."

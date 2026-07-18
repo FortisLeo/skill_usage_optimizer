@@ -65,11 +65,12 @@ guarantee dependency-correct bundles when a section isn't self-contained.
    shadowed safety preambles, with a CI-friendly exit code contract
    (0 = clean, 1 = warnings, 2 = errors).
 
-6. **Safety invariant carried through every phase** — every fallback
-   path (stale index, weak search match, ambiguous precedence, a
+6. **Safety invariant carried through every phase** — retrieval fallback
+   paths (weak search match, ambiguous precedence, a
    dependency resolution failure) degrades to at least today's
    whole-file-load behavior. The system can only help; it's designed to
-   never regress below what existed before it.
+   never regress below what existed before it. Stale indexes are the
+   security exception: they return bounded rebuild metadata only.
 
 ## 3. What's been built and verified (complete)
 
@@ -79,7 +80,7 @@ guarantee dependency-correct bundles when a section isn't self-contained.
 | P1 | BM25F search, code-identifier extraction, empty-parent-section aggregation fix, H1-overweighting fix | Real-only precision@3 = 92.9% (target: ≥80%) |
 | P2 | Dependency resolver — hard/soft edges, cycle detection, cross-trust enforcement, budget + collapse valve | Dependency recall = 1.0 on multi-section eval cases; cycle detection confirmed on synthetic fixture |
 | P3 | MCP tool surface (`search_skill_sections`, `resolve_task_sections`, `doctor` stub), token-savings measurement added to resolve response | CLI/MCP parity across full 24-query eval set; token savings: single-section mean 46.92% (range 25–88.64%), multi-section 65.8–68.3% (non-negative, confirming resolver overhead doesn't erase the benefit) |
-| P4 | Floor-invariant fix — stale index reads degrade to whole-file + warning instead of hard-refusing | Confirmed no production caller depended on hard-refuse behavior; all 8 unrelated staleness tests unaffected |
+| P4 | Stale index reads return bounded `REBUILD_REQUIRED` metadata without rereading changed source content | Regression coverage for stale retrieval tools |
 | P5 | CLI (`index/search/resolve/get/doctor/watch/stats`) | Output-identity parity vs. MCP tools on all commands; watch-mode race-condition tested with rapid double-edits |
 | P6 | Full `doctor` implementation, CI exit-code contract | All diagnostic categories fixture-tested individually; read-only confirmed (no mutation of source/index); CLI/MCP parity confirmed |
 | Post-core | Eval-drift remediation: found and fixed the eval scripts silently diverging from production logic since P1 (this had inflated earlier precision/recall numbers); re-verified against real production code paths | Real-only precision@3 re-confirmed at 92.9% post-fix, matching originally reported (pre-drift) number |

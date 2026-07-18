@@ -5,6 +5,7 @@ export { compile } from './compiler/index.js';
 export { loadContext } from './retrieval/context.js';
 export { doctor, MAX_SECTION_TOKENS } from './resolver/doctor.js';
 export { FileStore } from './store/fileStore.js';
+export { SOURCE_SYSTEMS } from './types.js';
 export type { ToolDeps } from './mcp/tools.js';
 export type { McpServerOptions } from './mcp/server.js';
 
@@ -12,6 +13,7 @@ export type {
   ArtifactKind,
   BoundaryError,
   DiscoveredArtifact,
+  DiscoveryDiagnostic,
   DiscoveryContext,
   DiscoverResult,
   CompileResult,

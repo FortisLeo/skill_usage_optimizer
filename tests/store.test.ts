@@ -1,10 +1,15 @@
 // ponytail: store unit tests
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileStore, SkillSection } from '../src/store/fileStore.js';
 import type { SkillManifest } from '../src/types.js';
+
+const execFileAsync = promisify(execFile);
 
 describe('FileStore', () => {
   let store: FileStore;
@@ -212,6 +217,47 @@ describe('FileStore', () => {
     writeFileSync(lockPath, JSON.stringify({ token: 'active-owner', pid: process.pid, createdAt: Date.now() }));
     await expect(store.updateSavings({ baselineTokens: 10, sentTokens: 2, savedTokens: 8 })).rejects.toThrow('savings lock timed out');
     expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ token: 'active-owner' });
+  });
+
+  it('dead stale index lock is recovered without stealing a live lock', async () => {
+    const lockPath = join(dir, '.index.lock');
+    writeFileSync(lockPath, JSON.stringify({ token: 'abandoned', pid: 99_999_999, createdAt: Date.now() - 31_000 }));
+    await expect(store.withIndexLock(async () => 'ok')).resolves.toBe('ok');
+
+    writeFileSync(lockPath, JSON.stringify({ token: 'active-owner', pid: process.pid, createdAt: Date.now() - 31_000 }));
+    await expect(store.withIndexLock(async () => 'stolen')).rejects.toThrow('index lock timed out');
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ token: 'active-owner' });
+
+    rmSync(lockPath, { force: true });
+    await store.withIndexLock(async () => { writeFileSync(lockPath, JSON.stringify({ token: 'replacement', pid: process.pid, createdAt: Date.now() })); });
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ token: 'replacement' });
+  });
+
+  it('allows only one process to reclaim a stale lock while all contenders complete', async () => {
+    const lockPath = join(dir, '.index.lock');
+    writeFileSync(lockPath, JSON.stringify({ token: 'abandoned', pid: 99_999_999, createdAt: Date.now() - 31_000 }));
+    const storeUrl = pathToFileURL(join(process.cwd(), 'dist/store/fileStore.js')).href;
+    const script = `
+      import { appendFile } from 'node:fs/promises';
+      import { FileStore } from ${JSON.stringify(storeUrl)};
+      const store = new FileStore(process.env.STORE_DIR);
+      await store.withIndexLock(() => appendFile(process.env.MARKER, process.pid + '\\n'));
+    `;
+    const marker = join(dir, 'owners');
+
+    await Promise.all(Array.from({ length: 6 }, () => execFileAsync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, STORE_DIR: dir, MARKER: marker }, timeout: 10_000 })));
+
+    expect(readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(6);
+    expect(readdirSync(dir).filter(name => name.includes('.recovery') || name.endsWith('.reclaim'))).toEqual([]);
+  });
+
+  it('index lock acquisition is bounded and malformed locks are not recovered', async () => {
+    const lockPath = join(dir, '.index.lock');
+    writeFileSync(lockPath, 'incomplete');
+    const started = Date.now();
+    await expect(store.withIndexLock(async () => undefined)).rejects.toThrow('index lock timed out');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(readFileSync(lockPath, 'utf8')).toBe('incomplete');
   });
 
   it('cleans up the savings queue after completion and rejection', async () => {

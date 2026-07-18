@@ -19,7 +19,7 @@ Full schemas live in [tool-reference.md](tool-reference.md).
 When you discover Ruleloom on a user's machine, follow this order:
 
 1. **Smoke test.** Call `list_skills` with no arguments. You should get back `{ "skills": [], "count": 0 }` on a fresh install, or a populated `skills` array after a prior indexing.
-2. **Identify the systems in use.** Look at the user's repo, or explicitly call `discover_skill_folders` with `{}` for the project. Call it separately with `{ "scope": "home" }` only when home discovery is wanted. It recursively finds folders named exactly lowercase `skills`; it does not read content, inspect arbitrary files, accept `/` or another custom root, or scan the full machine. The walk is bounded and skips symlinks and common excluded directories.
+2. **Identify the systems in use.** Look at the user's repo, or explicitly call `discover_skill_folders` with `{}` for the project. Call it separately with `{ "scope": "home" }` only when home discovery is wanted. It recursively finds folders named exactly lowercase `skills`; it does not read content, inspect arbitrary files, accept `/` or another custom root, or scan the full machine. The walk is bounded and skips symlinks and common excluded directories. Candidate systems come from canonical `SOURCE_SYSTEMS`, but not every system has an indexable root; Aider config candidates are non-indexable.
 3. **Index.** For a selected `indexable` candidate, call `index_skills` with its `system` and `roots: [candidate.indexRoot]`. Known roots keep their harness system; unknown harness `skills` folders report `generic`. Generic indexing rejects omitted or empty roots, so use `{ "system": "generic", "roots": [candidate.indexRoot] }`. Never pass `candidate.path`: it is root-relative display metadata and can be a file. `indexRoot` is already absolute for both project and home scans. Root instruction-file candidates are non-indexable because explicit roots are directories; normal system discovery handles them.
 4. **Verify.** Call `list_skills` again and confirm the count matches the rule files you saw. If the count is zero, see [troubleshooting.md](troubleshooting.md).
 5. **Pick the right system for follow-up reads.** `list_skills` accepts an optional `system` filter; pass it when you want only one slice. `get_skill_manifest`, `get_skill_sections`, `load_skill_context`, and `load_section` are system-agnostic — they work against whatever `skillId` or `sectionId` you give them.
@@ -116,7 +116,7 @@ Sections can link to other files (via wikilinks `[[like this]]` or markdown link
 
 ## Multi-system repos
 
-Some repos carry rules for more than one system. Ruleloom indexes each system independently. If the same skill name appears in `.claude/skills/` and `.opencode/rules/`, the compile step picks a winner based on precedence, and the `diagnostics` array explains the choice.
+Some repos carry rules for more than one system. Ruleloom indexes each system independently. If the same skill name appears in `.claude/skills/` and `.opencode/skills/`, the compile step picks a winner based on precedence, and the `diagnostics` array explains the choice.
 
 A reasonable steady state for a multi-system repo:
 

@@ -74,6 +74,7 @@ async function atomicWrite(filePath: string, data: string): Promise<void> {
 
 export class FileStore {
   private static savingsQueues = new Map<string, Promise<void>>();
+  private static indexQueues = new Map<string, Promise<void>>();
   constructor(private baseDir: string) {}
 
   get indexPath(): string {
@@ -183,6 +184,68 @@ export class FileStore {
     await atomicWrite(this.manifestsPath, json);
   }
 
+  async withIndexLock<T>(action: () => Promise<T>): Promise<T> {
+    return this.withFileLock('index', FileStore.indexQueues, action);
+  }
+
+  private async withFileLock<T>(name: 'index' | 'savings', queue: Map<string, Promise<void>>, action: () => Promise<T>): Promise<T> {
+    const previous = queue.get(this.baseDir) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>(resolve => { release = resolve; });
+    const queued = previous.then(() => current);
+    queue.set(this.baseDir, queued);
+    await previous;
+    const lockPath = join(this.baseDir, `.${name}.lock`);
+    const lockToken = randomUUID();
+    let ownsLock = false;
+    try {
+      await mkdir(this.baseDir, { recursive: true });
+      const deadline = Date.now() + LOCK_TIMEOUT_MS;
+      for (;;) {
+        try {
+          const lock = await open(lockPath, 'wx');
+          await lock.writeFile(JSON.stringify({ token: lockToken, pid: process.pid, createdAt: Date.now() }));
+          await lock.close();
+          ownsLock = true;
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          const reclaimPath = `${lockPath}.reclaim`;
+          let reclaim: Awaited<ReturnType<typeof open>> | undefined;
+          try {
+            reclaim = await open(reclaimPath, 'wx');
+            const existing = JSON.parse(await readFile(lockPath, 'utf-8'));
+            if (isStaleLock(existing)) {
+              const recoveryPath = `${lockPath}.${process.pid}.${randomUUID()}.recovery`;
+              await rename(lockPath, recoveryPath);
+              const recovered = JSON.parse(await readFile(recoveryPath, 'utf-8'));
+              if (recovered?.token === existing.token) await unlink(recoveryPath);
+            }
+          } catch (readError) {
+            if (!['EEXIST', 'ENOENT'].includes((readError as NodeJS.ErrnoException).code ?? '')) { /* An incomplete or invalid lock is never safe to recover. */ }
+          } finally {
+            if (reclaim) {
+              await reclaim.close().catch(() => {});
+              await unlink(reclaimPath).catch(() => {});
+            }
+          }
+          if (Date.now() >= deadline) throw new Error(`${name} lock timed out`);
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+      }
+      return await action();
+    } finally {
+      if (ownsLock) {
+        try {
+          const existing = JSON.parse(await readFile(lockPath, 'utf-8'));
+          if (existing?.token === lockToken) await unlink(lockPath);
+        } catch { /* The lock was already released or safely recovered. */ }
+      }
+      release();
+      if (queue.get(this.baseDir) === queued) queue.delete(this.baseDir);
+    }
+  }
+
   get savingsPath(): string {
     return join(this.baseDir, 'savings.json');
   }
@@ -219,41 +282,7 @@ export class FileStore {
   }
 
   async updateSavings(update: SavingsUpdate = {}): Promise<SavingsEnvelope> {
-    const previous = FileStore.savingsQueues.get(this.baseDir) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>(resolve => { release = resolve; });
-    const queued = previous.then(() => current);
-    FileStore.savingsQueues.set(this.baseDir, queued);
-    await previous;
-    let lockPath: string | undefined;
-    const lockToken = randomUUID();
-    let ownsLock = false;
-    try {
-      await mkdir(this.baseDir, { recursive: true });
-      lockPath = join(this.baseDir, '.savings.lock');
-      const deadline = Date.now() + LOCK_TIMEOUT_MS;
-      for (;;) {
-        try {
-          const lock = await open(lockPath, 'wx');
-          await lock.writeFile(JSON.stringify({ token: lockToken, pid: process.pid, createdAt: Date.now() }));
-          await lock.close();
-          ownsLock = true;
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-          try {
-            const existing = JSON.parse(await readFile(lockPath, 'utf-8'));
-            if (isStaleLock(existing)) {
-              const latest = JSON.parse(await readFile(lockPath, 'utf-8'));
-              if (latest?.token === existing.token) await unlink(lockPath).catch(() => {});
-            }
-          } catch (readError) {
-            if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') { /* An incomplete or invalid lock is never safe to recover. */ }
-          }
-          if (Date.now() >= deadline) throw new Error('savings lock timed out');
-          await new Promise(resolve => setTimeout(resolve, 5));
-        }
-      }
+    return this.withFileLock('savings', FileStore.savingsQueues, async () => {
       const envelope = await this.readSavings();
       const activeId = update.newSession ? randomUUID() : envelope.activeSession.id;
       const sessionId = update.sessionId ?? activeId;
@@ -271,16 +300,7 @@ export class FileStore {
       envelope.records = envelope.records.slice(-100);
       await atomicWrite(this.savingsPath, JSON.stringify(envelope, null, 2));
       return update.sessionId && !update.newSession ? { ...envelope, activeSession: { id: update.sessionId, ...(envelope.sessionTotals[update.sessionId] ?? EMPTY_TOTALS()) } } : envelope;
-    } finally {
-      if (lockPath && ownsLock) {
-        try {
-          const existing = JSON.parse(await readFile(lockPath, 'utf-8'));
-          if (existing?.token === lockToken) await unlink(lockPath);
-        } catch { /* The lock was already released or safely recovered. */ }
-      }
-      release();
-      if (FileStore.savingsQueues.get(this.baseDir) === queued) FileStore.savingsQueues.delete(this.baseDir);
-    }
+    });
   }
 
   async clearIndex(): Promise<void> {

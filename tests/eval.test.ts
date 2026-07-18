@@ -27,11 +27,8 @@ describe('schema validators', () => {
       expect(r.ok).toBe(false);
     });
 
-    it('accepts all valid systems', () => {
-      for (const sys of ['claude', 'opencode', 'codex', 'copilot']) {
-        const r = validateIndexSkillsArgs({ system: sys });
-        expect(r.ok).toBe(true);
-      }
+    it.each(['claude', 'opencode', 'codex', 'copilot', 'cursor', 'gemini', 'roo'])('accepts valid system %s', sys => {
+      expect(validateIndexSkillsArgs({ system: sys }).ok).toBe(true);
     });
 
     it('validates optional roots', () => {
@@ -57,8 +54,7 @@ describe('schema validators', () => {
     });
 
     it('accepts optional system filter', () => {
-      const r = validateListSkillsArgs({ system: 'opencode' });
-      expect(r.ok).toBe(true);
+      for (const system of ['opencode', 'gemini']) expect(validateListSkillsArgs({ system }).ok).toBe(true);
     });
 
     it('rejects invalid system', () => {

@@ -63,7 +63,7 @@ Three skills (`test-rules`, `code-style`, `pr-workflow`), eleven sections total,
 
 ### Step 3: index OpenCode
 
-Same repo has `.opencode/rules/`. Index OpenCode too.
+The same repo has `.opencode/skills/`. Index OpenCode too.
 
 ```json
 { "name": "index_skills", "arguments": { "system": "opencode", "baseDir": "/Users/me/code/myproject" } }
@@ -88,7 +88,7 @@ Expected response:
       "shadowed": [
         {
           "system": "opencode",
-          "sourcePath": "/Users/me/code/myproject/.opencode/rules/test-rules.md",
+          "sourcePath": "/Users/me/code/myproject/.opencode/skills/test-rules/SKILL.md",
           "sourceHash": "sha256:..."
         }
       ],
@@ -327,7 +327,7 @@ The response includes a `diagnostics` array. The agent reads it and reports:
 > Two sources define `test-rules`:
 >
 > - Winner: `.claude/skills/test-rules/SKILL.md` (precedence 80, the workspace Claude rule — won by source-path tie-break).
-> - Shadowed: `.opencode/rules/test-rules.md` (precedence 80, the workspace OpenCode rule).
+> - Shadowed: `.opencode/skills/test-rules/SKILL.md` (precedence 80, the workspace OpenCode skill).
 >
 > Ruleloom is using the Claude version. To switch, move the OpenCode file or delete the Claude one.
 
@@ -341,7 +341,7 @@ The user edits `.claude/skills/test-rules/SKILL.md` and adds a new section. The 
 
 ```json
 {
-  "errors": ["section \"claude::test-rules::cleanup\" source changed; rerun index_skills"],
+  "freshness": "stale",
   "rebuildRequired": {
     "code": "REBUILD_REQUIRED",
     "action": "index_skills",

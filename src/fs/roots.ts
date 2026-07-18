@@ -1,11 +1,23 @@
-import { realpathSync, existsSync, statSync } from 'node:fs';
-import { relative, isAbsolute } from 'node:path';
+import { realpathSync, existsSync, lstatSync, statSync } from 'node:fs';
+import { dirname, join, relative, isAbsolute, resolve } from 'node:path';
 import type { DiscoveryContext } from '../types.js';
 import { CODEX_SYSTEM_SKILLS_DIR } from '../config.js';
 
 export function resolveRealpath(p: string): string {
   if (!existsSync(p)) throw new Error(`path does not exist: ${p}`);
   return realpathSync(p);
+}
+
+export function findRepoRoot(baseDir: string): string | null {
+  let current = resolve(baseDir);
+  while (dirname(current) !== current) {
+    try {
+      const marker = lstatSync(join(current, '.git'));
+      if (marker.isDirectory() || marker.isFile()) return current;
+    } catch { /* keep walking */ }
+    current = dirname(current);
+  }
+  return null;
 }
 
 export function isWithinRoot(target: string, root: string): boolean {

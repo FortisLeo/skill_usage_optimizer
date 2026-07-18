@@ -1,0 +1,9 @@
+---
+description: React component conventions
+globs: src/components/**/*.tsx
+alwaysApply: false
+---
+
+# Components
+
+Use named exports.

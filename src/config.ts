@@ -1,18 +1,32 @@
 import type { DiscoveryContext, SourceSystem } from './types.js';
 
 export const DEFAULT_SKILL_DIRS: Record<SourceSystem, string[]> = {
-  claude: ['.claude/skills', '.claude/commands'],
-  opencode: ['.opencode/skills', '.opencode/rules'],
-  codex: ['.codex/skills', '.codex/agents'],
-  copilot: ['.github/copilot', '.github/instructions'],
+  claude: ['.claude/skills', '.claude/commands', '.claude/rules'],
+  opencode: ['.opencode/skills', '.opencode/skill', '.claude/skills', '.agents/skills'],
+  codex: ['.agents/skills'],
+  copilot: ['.github/skills', '.claude/skills', '.agents/skills', '.github/copilot'],
+  cursor: ['.cursor/skills', '.agents/skills', '.claude/skills', '.codex/skills'],
+  gemini: ['.gemini/skills', '.agents/skills'],
+  windsurf: [],
+  cline: ['.cline/skills', '.clinerules/skills', '.claude/skills'],
+  roo: ['.roo/skills', '.agents/skills'],
+  continue: ['.continue/rules'],
+  aider: [],
   generic: []
 };
 
 export const GLOBAL_SKILL_DIRS: Record<SourceSystem, string[]> = {
-  claude: ['.claude/skills'],
-  opencode: ['.opencode/skills', '.config/opencode/skills'],
-  codex: ['.codex/skills'],
-  copilot: ['.github/copilot'],
+  claude: ['.claude/skills', '.claude/commands', '.claude/rules'],
+  opencode: ['.config/opencode/skills', '.config/opencode/skill', '.claude/skills', '.agents/skills'],
+  codex: ['.agents/skills'],
+  copilot: ['.copilot/skills', '.claude/skills', '.agents/skills', '.github/copilot'],
+  cursor: ['.cursor/skills', '.agents/skills', '.claude/skills', '.codex/skills'],
+  gemini: ['.gemini/skills', '.agents/skills'],
+  windsurf: [],
+  cline: ['.cline/skills'],
+  roo: ['.roo/skills', '.agents/skills'],
+  continue: [],
+  aider: [],
   generic: []
 };
 

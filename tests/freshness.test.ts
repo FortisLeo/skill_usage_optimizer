@@ -65,22 +65,22 @@ describe('isStale', () => {
     expect(isStale(stored, current)).toBe(true);
   });
 
-  it('returns true when mtime is newer', () => {
+  it('returns false when only mtime is newer', () => {
     const stored = { hash: 'aaa', mtimeMs: 100, size: 1 };
     const current = { hash: 'aaa', mtimeMs: 200, size: 1 };
-    expect(isStale(stored, current)).toBe(true);
+    expect(isStale(stored, current)).toBe(false);
   });
 
-  it('returns true when mtime is older', () => {
+  it('returns false when only mtime is older', () => {
     const stored = { hash: 'aaa', mtimeMs: 200, size: 1 };
     const current = { hash: 'aaa', mtimeMs: 100, size: 1 };
-    expect(isStale(stored, current)).toBe(true);
+    expect(isStale(stored, current)).toBe(false);
   });
 
-  it('returns true when size differs', () => {
+  it('returns false when content hash matches despite a size metadata difference', () => {
     const stored = { hash: 'aaa', mtimeMs: 100, size: 1 };
     const current = { hash: 'aaa', mtimeMs: 100, size: 2 };
-    expect(isStale(stored, current)).toBe(true);
+    expect(isStale(stored, current)).toBe(false);
   });
 
   it('returns false when hash, mtime, and size match', () => {

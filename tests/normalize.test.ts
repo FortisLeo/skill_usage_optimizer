@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { normalize } from '../src/normalize/index.js';
@@ -7,6 +7,7 @@ import { discover } from '../src/discovery/index.js';
 import type { DiscoveredArtifact, DiscoveryContext } from '../src/types.js';
 import { makeTempWorkspace, writeFixture } from './testUtils.js';
 import { computeHash } from '../src/fs/freshness.js';
+import { scannerLimits } from '../src/discovery/shared.js';
 
 function makeArtifact(overrides: Partial<DiscoveredArtifact> = {}): DiscoveredArtifact {
   return {
@@ -68,23 +69,46 @@ describe('normalize', () => {
     }
   });
 
-  it('uses fresh size and mtime when file changes after discovery', () => {
+  it('rejects a regular-file replacement after discovery', () => {
     const { root, ctx, cleanup } = makeTempWorkspace();
     const path = writeFixture(root, '.claude/skills/race.md', '# Old');
     try {
       const { artifacts } = discover(ctx);
       const artifact = artifacts.find(a => a.absolutePath === path)!;
       writeFileSync(path, '# New content with a different size', 'utf-8');
-      const current = statSync(path);
-
       const { inputs, errors } = normalize([artifact], ctx);
 
-      expect(errors).toEqual([]);
-      expect(inputs[0]!.mtimeMs).toBe(current.mtimeMs);
-      expect(inputs[0]!.size).toBe(current.size);
+      expect(inputs).toEqual([]);
+      expect(errors[0]?.error).toContain('source changed after discovery');
     } finally {
       cleanup();
     }
+  });
+
+  it('rejects a symlink replacement after discovery', () => {
+    const { root, ctx, cleanup } = makeTempWorkspace();
+    const path = writeFixture(root, '.claude/skills/race.md', '# Old');
+    const target = writeFixture(root, 'replacement.md', '# Replacement');
+    try {
+      const artifact = discover(ctx).artifacts.find(a => a.absolutePath === path)!;
+      rmSync(path);
+      symlinkSync(target, path);
+      const result = normalize([artifact], ctx);
+      expect(result.inputs).toEqual([]);
+      expect(result.errors[0]?.error).toContain('unsafe source file');
+    } finally { cleanup(); }
+  });
+
+  it('rejects an oversized replacement after discovery', () => {
+    const { root, ctx, cleanup } = makeTempWorkspace();
+    const path = writeFixture(root, '.claude/skills/race.md', '# Old');
+    try {
+      const artifact = discover(ctx).artifacts.find(a => a.absolutePath === path)!;
+      writeFileSync(path, Buffer.alloc(scannerLimits.fileBytes + 1));
+      const result = normalize([artifact], ctx);
+      expect(result.inputs).toEqual([]);
+      expect(result.errors[0]?.error).toContain('byte limit');
+    } finally { cleanup(); }
   });
 
   it('extracts frontmatter fields correctly', () => {

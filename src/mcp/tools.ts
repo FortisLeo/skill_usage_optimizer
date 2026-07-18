@@ -1,13 +1,18 @@
 // ponytail: pure MCP tool handlers with injected pipeline functions
-import { statSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { DiscoveredArtifact, DiscoveryContext, NormalizedSkillInput, BoundaryError, DiscoverResult, NormalizeResult, RetrievalBundle, RetrievalRequest, SkillConflictDiagnostic, SkillManifest, SkillStore as TypesSkillStore, ResolveResult } from '../types.js';
 import type { SkillSection } from '../store/fileStore.js';
-import { computeHash, readSourceFile } from '../fs/freshness.js';
 import { extractMarkdownLinks } from '../retrieval/references.js';
 import { searchSections as defaultSearchSections } from '../search/lexical.js';
 import { resolve as defaultResolve } from '../resolver/index.js';
 import { doctor } from '../resolver/doctor.js';
 import { discoverSkillFolders } from '../discovery/candidates.js';
+import { findRepoRoot } from '../fs/roots.js';
+import { computeHash, normalizeContent } from '../fs/freshness.js';
+import { readBoundedSource } from '../fs/safeSource.js';
+import { scannerLimits } from '../discovery/shared.js';
+import { isDeepStrictEqual } from 'node:util';
 
 export interface ToolDeps {
   discover: (ctx: DiscoveryContext) => DiscoverResult;
@@ -21,6 +26,7 @@ export interface ToolDeps {
     writeSections: (sections: Map<string, SkillSection>) => Promise<void>;
     readManifests: () => Promise<Record<string, SkillManifest>>;
     writeManifests: (manifests: Record<string, SkillManifest>) => Promise<void>;
+    withIndexLock?: <T>(action: () => Promise<T>) => Promise<T>;
     readSavings?: () => Promise<unknown>;
     writeSavings?: (records: unknown) => Promise<void>;
     updateSavings?: (update?: { baselineTokens?: number; sentTokens?: number; savedTokens?: number; sessionId?: string; newSession?: boolean }) => Promise<unknown>;
@@ -62,12 +68,6 @@ async function sectionCandidates(deps: ToolDeps, phase?: string, skill?: string)
   return { sections: candidates };
 }
 
-async function querySections(deps: ToolDeps, query: string, phase?: string, skill?: string): Promise<{ sections?: SkillSection[]; error?: string }> {
-  const candidates = await sectionCandidates(deps, phase, skill);
-  if (candidates.error) return candidates;
-  return { sections: (deps.searchSections ?? defaultSearchSections)(candidates.sections!, query) };
-}
-
 function tokenSavings(result: ResolveResult, sections: SkillSection[], manifests: Record<string, SkillManifest>): { tokensLoaded: number; tokensWholeFile: number | null; savingsPct: number | null } {
   const tokensLoaded = result.sections.reduce((sum, s) => sum + (sections.find(x => x.id === s.id)?.tokenCount ?? 0), 0);
   const manifestIds = new Set(result.sections.map(s => sections.find(x => x.id === s.id)?.manifestId).filter((id): id is string => !!id));
@@ -98,46 +98,52 @@ function formatErrors(errors: BoundaryError[]): { errors: string[] } {
   return { errors: errors.map(e => `${e.path}: ${e.error}`) };
 }
 
+function sameManifestIdentity(manifest: SkillManifest, other: SkillManifest, sections: Map<string, SkillSection>, otherSections: Map<string, SkillSection>): boolean {
+  if (manifest.system !== other.system || manifest.sourceHash !== other.sourceHash || realpathSync(manifest.sourcePath) !== realpathSync(other.sourcePath) || manifest.sections.length !== other.sections.length) return false;
+  return manifest.sections.every((section, index) => {
+    const otherSection = other.sections[index];
+    const hash = sections.get(section.id)?.hash;
+    return otherSection?.id === section.id && typeof hash === 'string' && hash === otherSections.get(otherSection.id)?.hash;
+  });
+}
+
+function samePersistedSection(section: SkillSection, other: SkillSection): boolean {
+  return isDeepStrictEqual(JSON.parse(JSON.stringify(section)), JSON.parse(JSON.stringify(other)));
+}
+
 function freshnessError(section: SkillSection): string | null {
   if (!section.sourcePath || !section.sourceHash || typeof section.mtimeMs !== 'number' || typeof section.size !== 'number') {
     return `section "${section.id}" source metadata missing; rerun index_skills`;
   }
-  let stat: { mtimeMs: number; size: number };
   try {
-    stat = statSync(section.sourcePath);
+    const { content } = readBoundedSource(section.sourcePath, [dirname(section.sourcePath)], scannerLimits.fileBytes);
+    if (computeHash(normalizeContent(content)) !== section.sourceHash) throw new Error('source hash changed');
   } catch {
     return `section "${section.id}" source changed; rerun index_skills`;
   }
-  if (stat.mtimeMs === section.mtimeMs && stat.size === section.size) return null;
-  try {
-    const content = readSourceFile(section.sourcePath);
-    if (content === undefined) return `section "${section.id}" source changed; rerun index_skills`;
-    return computeHash(content) === section.sourceHash ? null : `section "${section.id}" source changed; rerun index_skills`;
-  } catch {
-    return `section "${section.id}" source changed; rerun index_skills`;
-  }
+  return null;
 }
 
 function staleErrors(sections: Iterable<SkillSection>): string[] {
   return [...sections].map(freshnessError).filter((e): e is string => e !== null);
 }
 
-// ponytail: stale indexes remain usable through current whole-file source fallback.
+const MAX_STALE_IDS = 100;
+
 function buildStaleResponse(staleSections: SkillSection[]): string {
-  const manifestIds = [...new Set(staleSections.map(s => s.manifestId).filter((m): m is string => !!m))];
+  const boundedSections = staleSections.slice(0, MAX_STALE_IDS);
+  const sectionIds = boundedSections.map(section => section.id);
+  const manifestIds = [...new Set(boundedSections.map(s => s.manifestId).filter((m): m is string => !!m))];
   return jsonResult({
     freshness: 'stale',
     rebuildRequired: {
       code: 'REBUILD_REQUIRED',
       action: 'index_skills',
-      sectionIds: staleSections.map(s => s.id),
+      sectionIds,
       ...(manifestIds.length > 0 ? { manifestIds } : {}),
-      reason: 'source_changed'
-    },
-    content: staleSections
-      .map(section => section.sourcePath ? readSourceFile(section.sourcePath) : undefined)
-      .filter((content): content is string => content !== undefined)
-      .join('\n\n')
+      reason: 'source_changed',
+      ...(staleSections.length > sectionIds.length ? { omittedSectionCount: staleSections.length - sectionIds.length } : {})
+    }
   });
 }
 
@@ -153,18 +159,14 @@ export async function handleIndexSkills(
 
   const ctx: DiscoveryContext = {
     workspaceRoot,
-    repoRoot: null,
+    repoRoot: findRepoRoot(workspaceRoot),
     homeDir,
     includeGlobals: true,
     includeSystem: false,
     explicitRoots: roots ?? [],
+    requestedSystem: system as DiscoveryContext['requestedSystem'],
     explicitRootSystem: roots && roots.length > 0 ? system as DiscoveryContext['explicitRootSystem'] : undefined
   };
-
-  if (force) {
-    if (deps.store.clearIndex) await deps.store.clearIndex(); else await deps.store.clear();
-    await deps.store.writeIndex({});
-  }
 
   const di = deps.discover(ctx);
   if (di.errors.length > 0) {
@@ -195,40 +197,78 @@ export async function handleIndexSkills(
     ? ci.store
     : new Map(Object.entries(ci.store as Record<string, SkillSection>));
 
-  const existingIndex = force ? {} : await deps.store.readIndex();
-  const existingSections = force ? new Map<string, SkillSection>() : await deps.store.readSections(Object.keys(existingIndex));
-  const store = new Map<string, SkillSection>();
-  existingSections.forEach((section, id) => {
-    if (section.system !== requested) store.set(id, section);
-  });
-  compiled.forEach((section, id) => store.set(id, section));
+  let cleanupError: string | undefined;
+  try {
+    const locked = deps.store.withIndexLock?.bind(deps.store) ?? (async <T>(action: () => Promise<T>) => action());
+    await locked(async () => {
+      const existingIndex = await deps.store.readIndex();
+      const existingManifests = await deps.store.readManifests();
+      const persistedSectionIds = [...new Set([...Object.keys(existingIndex), ...Object.values(existingManifests).flatMap(manifest => manifest.sections.map(section => section.id))])];
+      const existingSections = await deps.store.readSections(persistedSectionIds);
+      for (const [id, hash] of Object.entries(existingIndex)) {
+        const section = existingSections.get(id);
+        if (!section) throw new Error(`live section "${id}" is missing`);
+        if (section.hash !== hash) throw new Error(`live section "${id}" hash does not match index`);
+      }
 
-  await deps.store.writeSections(store);
+      for (const [id, section] of compiled) {
+        const existing = existingSections.get(id);
+        if (existing && (existing.id !== section.id || existing.content !== section.content || existing.hash !== section.hash)) throw new Error(`section ID collision: ${id}`);
+      }
 
-  const indexEntries: Record<string, string> = {};
-  store.forEach((section, id) => {
-    indexEntries[id] = section.hash;
-  });
-  await deps.store.writeIndex(indexEntries);
+      const incomingManifests: Record<string, SkillManifest> = {};
+      for (const manifest of ci.manifests ?? []) {
+        const duplicate = incomingManifests[manifest.id];
+        if (duplicate && !sameManifestIdentity(manifest, duplicate, compiled, compiled)) throw new Error(`manifest ID collision: ${manifest.id}`);
+        const existing = existingManifests[manifest.id];
+        if (existing && !sameManifestIdentity(manifest, existing, compiled, existingSections)) throw new Error(`manifest ID collision: ${manifest.id}`);
+        incomingManifests[manifest.id] = manifest;
+      }
 
-  // ponytail: always prune manifests for the reindexed system so that
-  // re-indexing to zero manifests properly removes stale persisted manifests.
-  const existingManifests = force ? {} : await deps.store.readManifests();
-  let manifestChanged = false;
-  for (const id of Object.keys(existingManifests)) {
-    if (existingManifests[id]!.system === requested) {
-      delete existingManifests[id];
-      manifestChanged = true;
-    }
-  }
-  if (ci.manifests && ci.manifests.length > 0) {
-    for (const manifest of ci.manifests) {
-      existingManifests[manifest.id] = manifest;
-      manifestChanged = true;
-    }
-  }
-  if (manifestChanged) {
-    await deps.store.writeManifests(existingManifests);
+      const targetSections = new Map<string, SkillSection>();
+      existingSections.forEach((section, id) => { if (id in existingIndex && section.system !== requested) targetSections.set(id, section); });
+      compiled.forEach((section, id) => targetSections.set(id, section));
+      const targetIndex = Object.fromEntries([...targetSections].map(([id, section]) => [id, section.hash]));
+
+      const sectionsToWrite = new Map([...compiled].filter(([id, section]) => {
+        const existing = existingSections.get(id);
+        return force || !existing || !samePersistedSection(existing, section);
+      }));
+      let sectionsAttempted = false;
+      let manifestsAttempted = false;
+      try {
+        sectionsAttempted = true;
+        await deps.store.writeSections(sectionsToWrite);
+        if (Object.keys(incomingManifests).length > 0) {
+          manifestsAttempted = true;
+          await deps.store.writeManifests({ ...existingManifests, ...incomingManifests });
+        }
+        await deps.store.writeIndex(targetIndex);
+      } catch (error) {
+        const rollbackErrors: string[] = [];
+        if (sectionsAttempted) {
+          const priorSections = new Map<string, SkillSection>();
+          for (const id of sectionsToWrite.keys()) if (existingSections.has(id)) priorSections.set(id, existingSections.get(id)!);
+          try { await deps.store.writeSections(priorSections); }
+          catch (rollbackError) { rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)); }
+        }
+        if (manifestsAttempted) {
+          try { await deps.store.writeManifests(existingManifests); }
+          catch (rollbackError) { rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)); }
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(rollbackErrors.length > 0 ? `${message}; rollback failed: ${rollbackErrors.join('; ')}` : message);
+      }
+
+      const liveManifests = Object.fromEntries(Object.entries(existingManifests).filter(([, manifest]) => manifest.system !== requested));
+      Object.assign(liveManifests, incomingManifests);
+      if (JSON.stringify(liveManifests) !== JSON.stringify({ ...existingManifests, ...incomingManifests })) {
+        try { await deps.store.writeManifests(liveManifests); }
+        catch (error) { cleanupError = `stale manifest cleanup failed: ${error instanceof Error ? error.message : String(error)}`; }
+      }
+    });
+  } catch (error) {
+    return jsonResult({ errors: [`index: ${error instanceof Error ? error.message : String(error)}`] });
   }
 
   // pony tail: indexedSkills = manifest count (fallback distinct manifestId count from sections)
@@ -237,6 +277,7 @@ export async function handleIndexSkills(
     : new Set([...compiled.values()].map(s => s.manifestId || s.id)).size;
 
   const conflictCount = ci.diagnostics ? ci.diagnostics.length : 0;
+  const discoveryDiagnostics = di.discoveryDiagnostics?.filter(diagnostic => diagnostic.environment === requested) ?? [];
   const displayErrors = ci.diagnostics && ci.diagnostics.length > 0
     ? ci.errors.filter(e => !isConflictError(e))
     : ci.errors;
@@ -244,7 +285,8 @@ export async function handleIndexSkills(
   return jsonResult({
     indexedSkills: manifestCount,
     indexedSections: compiled.size,
-    errors: displayErrors.map(e => `${e.path}: ${e.error}`),
+    errors: [...displayErrors.map(e => `${e.path}: ${e.error}`), ...(cleanupError ? [cleanupError] : [])],
+    ...(discoveryDiagnostics.length > 0 ? { discoveryDiagnostics } : {}),
     ...(conflictCount > 0 ? { conflictCount } : {}),
     ...(ci.diagnostics && ci.diagnostics.length > 0 ? { diagnostics: ci.diagnostics } : {})
   });
@@ -567,9 +609,12 @@ export async function handleLoadSection(
 }
 
 export async function handleSearchSkillSections(deps: ToolDeps, query: string, phase?: string, skill?: string, k?: number): Promise<string> {
-  const result = await querySections(deps, query, phase, skill);
-  if (result.error) return jsonResult({ errors: [result.error] });
-  return jsonResult({ query, sections: result.sections!.slice(0, k ?? 10), count: Math.min(result.sections!.length, k ?? 10) });
+  const candidates = await sectionCandidates(deps, phase, skill);
+  if (candidates.error) return jsonResult({ errors: [candidates.error] });
+  const staleSections = candidates.sections!.filter(section => freshnessError(section) !== null);
+  if (staleSections.length > 0) return buildStaleResponse(staleSections);
+  const sections = (deps.searchSections ?? defaultSearchSections)(candidates.sections!, query);
+  return jsonResult({ query, sections: sections.slice(0, k ?? 10), count: Math.min(sections.length, k ?? 10) });
 }
 
 export async function handleResolveTaskSections(deps: ToolDeps, query: string, phase?: string, skill?: string, budget?: number, includeSoft?: boolean, sessionId?: string, newSession?: boolean): Promise<string> {
@@ -578,6 +623,8 @@ export async function handleResolveTaskSections(deps: ToolDeps, query: string, p
     const found = await sectionCandidates(deps, phase);
     if (found.error) return jsonResult({ errors: [found.error] });
     const sections = found.sections!;
+    const staleSections = sections.filter(section => freshnessError(section) !== null);
+    if (staleSections.length > 0) return buildStaleResponse(staleSections);
     const resolver = deps.resolve ?? defaultResolve;
     const result = resolver(sections, { query, skill, budget, ...(includeSoft === undefined ? {} : { includeSoft }) });
     const manifests = await deps.store.readManifests();

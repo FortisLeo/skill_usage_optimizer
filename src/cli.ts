@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { watch as fsWatch } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
-import { computeHash, readSourceFile, statFile } from './fs/freshness.js';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { computeHash, normalizeContent } from './fs/freshness.js';
+import { readBoundedSource } from './fs/safeSource.js';
+import { scannerLimits } from './discovery/shared.js';
 import { FileStore } from './store/fileStore.js';
 import { createToolDeps } from './mcp/server.js';
 import { handleDoctor, handleGetTokenSavingsStats, handleIndexSkills } from './mcp/tools.js';
@@ -92,9 +94,10 @@ export function startWatch(deps: ToolDeps, system: string, path: string, delay =
         const sections = await deps.store.readSections(Object.keys(index));
         const stale = sections.size === 0 || [...sections.values()].some(section => {
           if (!section.sourcePath || !section.sourceHash) return true;
-          const source = readSourceFile(section.sourcePath);
-          const stat = statFile(section.sourcePath);
-          return source === undefined || stat === null || computeHash(source) !== section.sourceHash;
+          try {
+            const { content } = readBoundedSource(section.sourcePath, [dirname(section.sourcePath)], scannerLimits.fileBytes);
+            return computeHash(normalizeContent(content)) !== section.sourceHash;
+          } catch { return true; }
         });
         if (stale) await handleIndexSkills(deps, system, [path], undefined, false);
       });

@@ -1,5 +1,5 @@
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import {
@@ -7,6 +7,7 @@ import {
   isWithinRoot,
   isPathSafe,
   collectAllowedRoots,
+  findRepoRoot,
   validateRoot
 } from '../src/fs/roots.js';
 import type { DiscoveryContext } from '../src/types.js';
@@ -23,6 +24,38 @@ function makeCtx(overrides: Partial<DiscoveryContext>): DiscoveryContext {
     ...overrides
   };
 }
+
+describe('findRepoRoot', () => {
+  it('finds normal and nearest nested repositories', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-root-'));
+    const nestedRepo = join(root, 'packages', 'nested');
+    const workspace = join(nestedRepo, 'src');
+    mkdirSync(join(root, '.git'));
+    mkdirSync(join(nestedRepo, '.git'), { recursive: true });
+    mkdirSync(workspace);
+    try {
+      expect(findRepoRoot(join(root, 'packages'))).toBe(root);
+      expect(findRepoRoot(workspace)).toBe(nestedRepo);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('accepts a linked-worktree .git file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'worktree-root-'));
+    const workspace = join(root, 'src');
+    mkdirSync(workspace);
+    writeFileSync(join(root, '.git'), 'gitdir: /tmp/example');
+    try { expect(findRepoRoot(workspace)).toBe(root); }
+    finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('returns null outside Git repositories and at the filesystem root', () => {
+    const root = mkdtempSync(join(tmpdir(), 'non-repo-root-'));
+    try {
+      expect(findRepoRoot(root)).toBeNull();
+      expect(findRepoRoot(resolve(root, '/'))).toBeNull();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
 
 describe('resolveRealpath', () => {
   it('resolves a path to its real path', () => {

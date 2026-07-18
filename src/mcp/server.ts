@@ -36,6 +36,7 @@ import {
 } from './schemas.js';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+import { SOURCE_SYSTEMS } from '../types.js';
 
 export const TOOL_DEFS = [
   {
@@ -45,11 +46,11 @@ export const TOOL_DEFS = [
   },
   {
     name: 'index_skills',
-    description: 'Discover, normalize, and compile skills from a source system into the local cache.',
+    description: 'Discover, normalize, and compile skills from a source system into the local cache. Returns response-only discoveryDiagnostics for non-fatal source limitations; compiler conflicts remain in diagnostics.',
     inputSchema: {
       type: 'object',
       properties: {
-        system: { type: 'string', enum: ['claude', 'opencode', 'codex', 'copilot', 'generic'] },
+        system: { type: 'string', enum: [...SOURCE_SYSTEMS] },
         roots: { type: 'array', items: { type: 'string' } },
         baseDir: { type: 'string' },
         force: { type: 'boolean' }
@@ -63,7 +64,7 @@ export const TOOL_DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        system: { type: 'string', enum: ['claude', 'opencode', 'codex', 'copilot', 'generic'] }
+        system: { type: 'string', enum: [...SOURCE_SYSTEMS] }
       }
     }
   },
@@ -283,10 +284,25 @@ export async function handleMcpToolCall(deps: ToolDeps, name: string, args: unkn
       if (!v.ok) return error(v.errors);
       return { content: [{ type: 'text', text: await handleIndexSkills(deps, v.value.system, v.value.roots, v.value.baseDir, v.value.force) }] };
     }
+    if (name === 'list_skills') {
+      const v = validateListSkillsArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleListSkills(deps, v.value.system) }] };
+    }
+    if (name === 'get_skill_manifest') {
+      const v = validateGetSkillManifestArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleGetSkillManifest(deps, v.value.skillId) }] };
+    }
     if (name === 'get_skill_sections') {
       const v = validateGetSkillSectionsArgs(args);
       if (!v.ok) return error(v.errors);
       return { content: [{ type: 'text', text: await handleGetSkillSections(deps, v.value.skillId) }] };
+    }
+    if (name === 'load_skill_context') {
+      const v = validateLoadSkillContextArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleLoadSkillContext(deps, v.value.query, v.value.phase, v.value.includeReferences, v.value.maxBytes) }] };
     }
     if (name === 'load_section') {
       const v = validateLoadSectionArgs(args);
