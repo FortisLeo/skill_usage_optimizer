@@ -5,7 +5,7 @@
 ## Core Types
 
 ```typescript
-export type SourceSystem = 'claude' | 'opencode' | 'codex' | 'copilot';
+export type SourceSystem = 'claude' | 'opencode' | 'codex' | 'copilot' | 'generic';
 
 export type SectionClass = 'always' | 'phase' | 'on_demand' | 'reference';
 

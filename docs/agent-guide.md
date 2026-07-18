@@ -5,6 +5,7 @@ This doc is for AI agents that have Ruleloom installed as an MCP server. The goa
 ## Tool surface, in one sentence each
 
 - `index_skills` writes the cache. Call it when sources have changed or on a cold start.
+- `discover_skill_folders` is opt-in, bounded discovery of known roots and literal lowercase `skills` directories. Use `indexRoot` only from candidates marked `indexable`.
 - `list_skills` reads the cache. Cheap, freshness-checked.
 - `get_skill_manifest` reads one skill's summary. Use to inspect before loading.
 - `get_skill_sections` reads one skill's full sections. Heavier than the manifest.
@@ -18,8 +19,8 @@ Full schemas live in [tool-reference.md](tool-reference.md).
 When you discover Ruleloom on a user's machine, follow this order:
 
 1. **Smoke test.** Call `list_skills` with no arguments. You should get back `{ "skills": [], "count": 0 }` on a fresh install, or a populated `skills` array after a prior indexing.
-2. **Identify the systems in use.** Look at the user's repo. If you see `.claude/`, `.opencode/`, `.codex/`, or `.github/copilot` or `.github/instructions/`, plan one `index_skills` per system. If you see none, ask the user which harness they use.
-3. **Index.** Call `index_skills` for each system you found. The first call is slow (it scans the filesystem and reads rule files). Subsequent calls are fast and incremental.
+2. **Identify the systems in use.** Look at the user's repo, or explicitly call `discover_skill_folders` with `{}` for the project. Call it separately with `{ "scope": "home" }` only when home discovery is wanted. It recursively finds folders named exactly lowercase `skills`; it does not read content, inspect arbitrary files, accept `/` or another custom root, or scan the full machine. The walk is bounded and skips symlinks and common excluded directories.
+3. **Index.** For a selected `indexable` candidate, call `index_skills` with its `system` and `roots: [candidate.indexRoot]`. Known roots keep their harness system; unknown harness `skills` folders report `generic`. Generic indexing rejects omitted or empty roots, so use `{ "system": "generic", "roots": [candidate.indexRoot] }`. Never pass `candidate.path`: it is root-relative display metadata and can be a file. `indexRoot` is already absolute for both project and home scans. Root instruction-file candidates are non-indexable because explicit roots are directories; normal system discovery handles them.
 4. **Verify.** Call `list_skills` again and confirm the count matches the rule files you saw. If the count is zero, see [troubleshooting.md](troubleshooting.md).
 5. **Pick the right system for follow-up reads.** `list_skills` accepts an optional `system` filter; pass it when you want only one slice. `get_skill_manifest`, `get_skill_sections`, `load_skill_context`, and `load_section` are system-agnostic — they work against whatever `skillId` or `sectionId` you give them.
 

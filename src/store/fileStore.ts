@@ -1,4 +1,5 @@
-import { readFile, writeFile, rename, mkdir, rm } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, rm, open, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import type { SkillManifest, SkillSection } from '../types.js';
@@ -7,6 +8,58 @@ export type { SkillSection } from '../types.js';
 
 export type SkillStore = Map<string, SkillSection>;
 
+export interface SavingsTotals { calls: number; baselineTokens: number; sentTokens: number; savedTokens: number; reductionPct: number; }
+export interface SavingsSession extends SavingsTotals { id: string; }
+export interface SavingsRecord { sessionId: string; baselineTokens: number; sentTokens: number; savedTokens: number; }
+export interface SavingsEnvelope { version: 3; records: SavingsRecord[]; lifetime: SavingsTotals; activeSession: SavingsSession; sessionTotals: Record<string, SavingsTotals>; }
+export interface SavingsUpdate { baselineTokens?: number; sentTokens?: number; savedTokens?: number; sessionId?: string; newSession?: boolean; }
+
+const EMPTY_TOTALS = (): SavingsTotals => ({ calls: 0, baselineTokens: 0, sentTokens: 0, savedTokens: 0, reductionPct: 0 });
+const LOCK_TIMEOUT_MS = 1_000;
+const LOCK_STALE_MS = 30_000;
+const isNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const totals = (records: SavingsRecord[]): SavingsTotals => {
+  const result = records.reduce((sum, record) => ({ calls: sum.calls + 1, baselineTokens: sum.baselineTokens + record.baselineTokens, sentTokens: sum.sentTokens + record.sentTokens, savedTokens: sum.savedTokens + record.savedTokens, reductionPct: 0 }), EMPTY_TOTALS());
+  result.reductionPct = result.baselineTokens === 0 ? 0 : Math.max(0, Math.min(100, result.savedTokens / result.baselineTokens * 100));
+  return result;
+};
+const addRecord = (total: SavingsTotals, record: SavingsRecord): SavingsTotals => {
+  const baselineTokens = total.baselineTokens + record.baselineTokens;
+  const savedTokens = total.savedTokens + record.savedTokens;
+  return { calls: total.calls + 1, baselineTokens, sentTokens: total.sentTokens + record.sentTokens, savedTokens, reductionPct: baselineTokens === 0 ? 0 : Math.max(0, Math.min(100, savedTokens / baselineTokens * 100)) };
+};
+const validTotals = (value: unknown): SavingsTotals | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const total = value as Record<string, unknown>;
+  if (!isNumber(total.calls) || !isNumber(total.baselineTokens) || !isNumber(total.sentTokens) || !isNumber(total.savedTokens)) return undefined;
+  return { calls: total.calls, baselineTokens: total.baselineTokens, sentTokens: total.sentTokens, savedTokens: total.savedTokens, reductionPct: total.baselineTokens === 0 ? 0 : Math.max(0, Math.min(100, total.savedTokens / total.baselineTokens * 100)) };
+};
+const validRecord = (value: unknown): SavingsRecord | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const savings = record.tokenSavings && typeof record.tokenSavings === 'object' ? record.tokenSavings as Record<string, unknown> : record;
+  const baselineTokens = savings.baselineTokens ?? savings.tokensWholeFile;
+  const sentTokens = savings.sentTokens ?? savings.tokensLoaded;
+  const savedTokens = savings.savedTokens ?? (isNumber(baselineTokens) && isNumber(sentTokens) ? Math.max(baselineTokens - sentTokens, 0) : undefined);
+  if (!isNumber(baselineTokens) || !isNumber(sentTokens) || !isNumber(savedTokens)) return undefined;
+  return { sessionId: typeof record.sessionId === 'string' ? record.sessionId : 'legacy', baselineTokens, sentTokens, savedTokens: Math.min(savedTokens, baselineTokens) };
+};
+const validSessionTotals = (value: unknown): Record<string, SavingsTotals> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([id, total]) => {
+    const parsed = validTotals(total);
+    return parsed ? [[id, parsed]] : [];
+  }));
+};
+const isStaleLock = (value: unknown): value is { token: string; createdAt: number; pid: number } => {
+  if (!value || typeof value !== 'object') return false;
+  const lock = value as Record<string, unknown>;
+  const pid = lock.pid;
+  if (typeof lock.token !== 'string' || lock.token.length === 0 || typeof lock.createdAt !== 'number' || !Number.isFinite(lock.createdAt) || lock.createdAt > Date.now() - LOCK_STALE_MS || typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+};
+
 /** Encodes a skill ID to a collision-safe filename segment using base64url. */
 function encodeFilename(id: string): string {
   return Buffer.from(id, 'utf-8').toString('base64url');
@@ -14,12 +67,13 @@ function encodeFilename(id: string): string {
 
 /** Atomic write: write to a temp file in the same directory, then rename. */
 async function atomicWrite(filePath: string, data: string): Promise<void> {
-  const tmp = filePath + '.tmp';
+  const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, data, 'utf-8');
   await rename(tmp, filePath);
 }
 
 export class FileStore {
+  private static savingsQueues = new Map<string, Promise<void>>();
   constructor(private baseDir: string) {}
 
   get indexPath(): string {
@@ -133,17 +187,104 @@ export class FileStore {
     return join(this.baseDir, 'savings.json');
   }
 
-  async readSavings(): Promise<unknown> {
+  async readSavings(): Promise<SavingsEnvelope> {
     for (const name of ['savings.json', 'checkout.json']) {
-      try { return JSON.parse(await readFile(join(this.baseDir, name), 'utf-8')); }
+      try { return this.toSavingsEnvelope(JSON.parse(await readFile(join(this.baseDir, name), 'utf-8'))); }
       catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
     }
-    return [];
+    return this.toSavingsEnvelope([]);
   }
 
-  async writeSavings(records: unknown): Promise<void> {
+  private toSavingsEnvelope(value: unknown): SavingsEnvelope {
+    const raw = Array.isArray(value) ? value : value && typeof value === 'object' && Array.isArray((value as { records?: unknown }).records) ? (value as { records: unknown[] }).records : [];
+    const allRecords = raw.map(validRecord).filter((record): record is SavingsRecord => !!record);
+    const records = allRecords.slice(-100);
+    const envelope = value && typeof value === 'object' ? value as { version?: unknown; lifetime?: unknown; activeSession?: { id?: unknown }; sessionTotals?: unknown } : undefined;
+    const activeId = typeof envelope?.activeSession?.id === 'string' ? envelope.activeSession.id : randomUUID();
+    const activeRecords = allRecords.filter(record => record.sessionId === activeId);
+    // A buggy v2 file has already discarded its older totals; retain its persisted values rather than guessing them.
+    const sessionTotals = validSessionTotals(envelope?.sessionTotals);
+    const recordedSessionTotals: Record<string, SavingsTotals> = {};
+    for (const record of allRecords) recordedSessionTotals[record.sessionId] = addRecord(recordedSessionTotals[record.sessionId] ?? EMPTY_TOTALS(), record);
+    for (const [id, total] of Object.entries(recordedSessionTotals)) sessionTotals[id] ??= total;
+    sessionTotals[activeId] = envelope?.version === 2
+      ? validTotals(envelope.activeSession) ?? sessionTotals[activeId] ?? totals(activeRecords)
+      : sessionTotals[activeId] ?? validTotals(envelope?.activeSession) ?? totals(activeRecords);
+    return { version: 3, records, lifetime: envelope?.version === 2 || envelope?.version === 3 ? validTotals(envelope.lifetime) ?? totals(allRecords) : totals(allRecords), activeSession: { id: activeId, ...sessionTotals[activeId]! }, sessionTotals };
+  }
+
+  async writeSavings(value: unknown): Promise<void> {
     await mkdir(this.baseDir, { recursive: true });
-    await atomicWrite(this.savingsPath, JSON.stringify(records, null, 2));
+    await atomicWrite(this.savingsPath, JSON.stringify(this.toSavingsEnvelope(value), null, 2));
+  }
+
+  async updateSavings(update: SavingsUpdate = {}): Promise<SavingsEnvelope> {
+    const previous = FileStore.savingsQueues.get(this.baseDir) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>(resolve => { release = resolve; });
+    const queued = previous.then(() => current);
+    FileStore.savingsQueues.set(this.baseDir, queued);
+    await previous;
+    let lockPath: string | undefined;
+    const lockToken = randomUUID();
+    let ownsLock = false;
+    try {
+      await mkdir(this.baseDir, { recursive: true });
+      lockPath = join(this.baseDir, '.savings.lock');
+      const deadline = Date.now() + LOCK_TIMEOUT_MS;
+      for (;;) {
+        try {
+          const lock = await open(lockPath, 'wx');
+          await lock.writeFile(JSON.stringify({ token: lockToken, pid: process.pid, createdAt: Date.now() }));
+          await lock.close();
+          ownsLock = true;
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          try {
+            const existing = JSON.parse(await readFile(lockPath, 'utf-8'));
+            if (isStaleLock(existing)) {
+              const latest = JSON.parse(await readFile(lockPath, 'utf-8'));
+              if (latest?.token === existing.token) await unlink(lockPath).catch(() => {});
+            }
+          } catch (readError) {
+            if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') { /* An incomplete or invalid lock is never safe to recover. */ }
+          }
+          if (Date.now() >= deadline) throw new Error('savings lock timed out');
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+      }
+      const envelope = await this.readSavings();
+      const activeId = update.newSession ? randomUUID() : envelope.activeSession.id;
+      const sessionId = update.sessionId ?? activeId;
+      if (update.newSession) {
+        envelope.activeSession = { id: activeId, ...EMPTY_TOTALS() };
+        envelope.sessionTotals[activeId] = EMPTY_TOTALS();
+      }
+      if (isNumber(update.baselineTokens) && isNumber(update.sentTokens) && isNumber(update.savedTokens)) {
+        const record = { sessionId, baselineTokens: update.baselineTokens, sentTokens: update.sentTokens, savedTokens: Math.min(update.savedTokens, update.baselineTokens) };
+        envelope.records.push(record);
+        envelope.lifetime = addRecord(envelope.lifetime, record);
+        envelope.sessionTotals[sessionId] = addRecord(envelope.sessionTotals[sessionId] ?? EMPTY_TOTALS(), record);
+        if (sessionId === activeId) envelope.activeSession = { id: activeId, ...envelope.sessionTotals[activeId]! };
+      }
+      envelope.records = envelope.records.slice(-100);
+      await atomicWrite(this.savingsPath, JSON.stringify(envelope, null, 2));
+      return update.sessionId && !update.newSession ? { ...envelope, activeSession: { id: update.sessionId, ...(envelope.sessionTotals[update.sessionId] ?? EMPTY_TOTALS()) } } : envelope;
+    } finally {
+      if (lockPath && ownsLock) {
+        try {
+          const existing = JSON.parse(await readFile(lockPath, 'utf-8'));
+          if (existing?.token === lockToken) await unlink(lockPath);
+        } catch { /* The lock was already released or safely recovered. */ }
+      }
+      release();
+      if (FileStore.savingsQueues.get(this.baseDir) === queued) FileStore.savingsQueues.delete(this.baseDir);
+    }
+  }
+
+  async clearIndex(): Promise<void> {
+    await Promise.all([rm(this.indexPath, { force: true }), rm(this.sectionsDir, { recursive: true, force: true }), rm(this.manifestsPath, { force: true })]);
   }
 
   async clear(): Promise<void> {

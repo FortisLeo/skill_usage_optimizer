@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { TOOL_DEFS, handleMcpToolCall } from '../src/mcp/server.js';
-import { validateResolveTaskSectionsArgs, validateSearchSkillSectionsArgs } from '../src/mcp/schemas.js';
-import { handleResolveTaskSections, handleSearchSkillSections } from '../src/mcp/tools.js';
-import { handleLoadSkillContext, handleLoadSection } from '../src/mcp/tools.js';
+import { validateDiscoverSkillFoldersArgs, validateIndexSkillsArgs, validateResolveTaskSectionsArgs, validateSearchSkillSectionsArgs } from '../src/mcp/schemas.js';
+import { handleGetTokenSavingsStats, handleResolveTaskSections, handleSearchSkillSections, handleLoadSkillContext, handleLoadSection } from '../src/mcp/tools.js';
+import { FileStore } from '../src/store/fileStore.js';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { resolve } from '../src/resolver/index.js';
 import type { ToolDeps } from '../src/mcp/tools.js';
 import type { SkillManifest, SkillSection } from '../src/types.js';
-import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { computeHash, normalizeContent } from '../src/fs/freshness.js';
 import { searchSections } from '../src/search/lexical.js';
@@ -25,21 +27,98 @@ describe('P3 MCP surface', () => {
     expect(new Set(names).size).toBe(names.length);
     const legacy = new Set(['index_skills', 'list_skills', 'get_skill_manifest', 'get_skill_sections', 'load_skill_context', 'load_section']);
     expect(names.filter(name => legacy.has(name))).toHaveLength(6);
-    expect(names.filter(name => ['search_skill_sections', 'resolve_task_sections', 'doctor'].includes(name)))
-      .toHaveLength(3);
-    expect(names).toEqual(expect.arrayContaining(['search_skill_sections', 'resolve_task_sections', 'doctor']));
+    expect(names).toEqual(expect.arrayContaining(['search_skill_sections', 'resolve_task_sections', 'get_token_savings_stats', 'doctor']));
+    expect(names).toContain('discover_skill_folders');
   });
   it('validates actual payload boundaries', () => {
     expect(validateSearchSkillSectionsArgs({})).toMatchObject({ ok: false });
     expect(validateSearchSkillSectionsArgs({ query: 'x', k: '3' })).toMatchObject({ ok: false });
     expect(validateResolveTaskSectionsArgs({ query: 'x', budget: '3' })).toMatchObject({ ok: false });
     expect(validateResolveTaskSectionsArgs({ query: 'x', budget: 3 })).toMatchObject({ ok: true });
+    expect(validateResolveTaskSectionsArgs({ query: 'x', sessionId: 'person@example.com' })).toMatchObject({ ok: false });
+    expect(validateResolveTaskSectionsArgs({ query: 'x', sessionId: 'safe', newSession: true })).toMatchObject({ ok: false });
+    expect(validateDiscoverSkillFoldersArgs({})).toMatchObject({ ok: true, value: { scope: 'project' } });
+    expect(validateDiscoverSkillFoldersArgs({ scope: 'machine' })).toMatchObject({ ok: false });
+    expect(validateDiscoverSkillFoldersArgs({ scope: 'home', path: '/' })).toMatchObject({ ok: false });
+    expect(validateIndexSkillsArgs({ system: 'generic' })).toMatchObject({ ok: false });
+    expect(validateIndexSkillsArgs({ system: 'generic', roots: [] })).toMatchObject({ ok: false });
+    expect(validateIndexSkillsArgs({ system: 'generic', roots: [''] })).toMatchObject({ ok: false });
+    expect(validateIndexSkillsArgs({ system: 'generic', roots: ['/repo/skills'] })).toMatchObject({ ok: true });
+    const indexDef = TOOL_DEFS.find(tool => tool.name === 'index_skills')!;
+    const listDef = TOOL_DEFS.find(tool => tool.name === 'list_skills')!;
+    expect((indexDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('generic');
+    expect((listDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('generic');
+  });
+
+  it('dispatches bounded candidate discovery without indexing', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'mcp-candidates-project-'));
+    const home = mkdtempSync(join(tmpdir(), 'mcp-candidates-home-'));
+    try {
+      mkdirSync(join(project, '.opencode', 'rules'), { recursive: true });
+      mkdirSync(join(home, '.claude', 'skills', 'demo'), { recursive: true });
+      writeFileSync(join(home, '.claude', 'skills', 'demo', 'SKILL.md'), 'secret-skill-body');
+      const toolDeps = { ...deps, resolveWorkspaceRoot: () => project, resolveHomeDir: () => home } as ToolDeps;
+      const response = await handleMcpToolCall(toolDeps, 'discover_skill_folders', { limit: 1 });
+      expect(response.isError).toBeUndefined();
+      const projectPayload = JSON.parse(response.content[0].text);
+      expect(projectPayload).toMatchObject({
+        scope: 'project', root: expect.any(String),
+        candidates: [expect.objectContaining({ path: '.opencode/rules', indexRoot: join(projectPayload.root, '.opencode', 'rules') })]
+      });
+      const homeResponse = await handleMcpToolCall(toolDeps, 'discover_skill_folders', { scope: 'home', limit: 1 });
+      const homePayload = JSON.parse(homeResponse.content[0].text);
+      expect(homePayload).toMatchObject({ scope: 'home', root: expect.any(String) });
+      expect(homePayload.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: '.claude/skills', indexRoot: join(homePayload.root, '.claude', 'skills') })
+      ]));
+      expect(JSON.stringify(homePayload)).not.toContain('secret-skill-body');
+    } finally { rmSync(project, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
   });
   it('applies phase as an AND filter and emits savings', async () => {
     const search = JSON.parse(await handleSearchSkillSections(deps, 'query', 'planning', 'a', 10));
     expect(search.sections.map((s: SkillSection) => s.id)).toEqual(['a::one']);
     const resolved = JSON.parse(await handleResolveTaskSections(deps, 'query', 'planning', 'a'));
     expect(resolved.tokenSavings).toEqual({ tokensLoaded: 2, tokensWholeFile: 10, savingsPct: 80 });
+  });
+  it('reads named-session totals after history pruning and restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-savings-'));
+    try {
+      const store = new FileStore(dir);
+      for (let i = 0; i < 120; i++) await store.updateSavings({ sessionId: i % 2 ? 'alpha' : 'beta', baselineTokens: 10, sentTokens: 2, savedTokens: 8 });
+      const restarted = new FileStore(dir);
+      const result = JSON.parse(await handleGetTokenSavingsStats({ ...deps, store: restarted } as ToolDeps, 'alpha'));
+      expect(result.recordCount).toBe(100);
+      expect(result.session).toMatchObject({ id: 'alpha', calls: 60, baselineTokens: 600, sentTokens: 120, savedTokens: 480 });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('reads stats without mutating and propagates persistence corruption', async () => {
+    let updates = 0;
+    const readOnly = { ...deps, store: { ...deps.store,
+      readSavings: async () => ({ records: [], lifetime: { calls: 0 }, activeSession: { id: 'active', calls: 0 }, sessionTotals: {} }),
+      updateSavings: async () => { updates++; throw new Error('must not write'); }
+    } } as unknown as ToolDeps;
+    expect(JSON.parse(await handleGetTokenSavingsStats(readOnly)).session.id).toBe('active');
+    expect(updates).toBe(0);
+
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-savings-corrupt-'));
+    try {
+      writeFileSync(join(dir, 'savings.json'), 'not-json');
+      const response = await handleMcpToolCall({ ...deps, store: new FileStore(dir) } as ToolDeps, 'get_token_savings_stats');
+      expect(response.isError).toBe(true);
+      expect(JSON.parse(response.content[0].text).errors[0]).toMatch(/JSON|Unexpected token/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('persists a new zero-total session when whole-file counts are unavailable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-zero-session-'));
+    try {
+      const store = new FileStore(dir);
+      await store.writeSections(new Map(sections.map(section => [section.id, section])));
+      await store.writeIndex(Object.fromEntries(sections.map(section => [section.id, section.hash])));
+      const zeroDeps = { ...deps, store, resolve: () => ({ query: 'query', seed: 'a::one', collapsed: false, sections: [{ id: 'a::one', headingPath: ['Planning setup'], content: 'setup query', role: 'seed' as const, order: 0, trustTier: 'project' as const }], leftovers: [], budget: { limit: 5000, used: 2 } }) } as ToolDeps;
+      const result = JSON.parse(await handleResolveTaskSections(zeroDeps, 'query', undefined, undefined, undefined, undefined, undefined, true));
+      expect(result.tokenSavings).toMatchObject({ tokensWholeFile: null, savingsPct: null });
+      expect(await store.readSavings()).toMatchObject({ lifetime: { calls: 0 }, activeSession: { calls: 0 }, records: [] });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it('reports unknown skills cleanly', async () => {
     expect(JSON.parse(await handleSearchSkillSections(deps, 'x', undefined, 'missing')).errors).toEqual(['skill "missing" not found in index']);

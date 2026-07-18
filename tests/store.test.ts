@@ -1,6 +1,6 @@
 // ponytail: store unit tests
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileStore, SkillSection } from '../src/store/fileStore.js';
@@ -168,10 +168,60 @@ describe('FileStore', () => {
     });
   });
 
-  it('writes and reads savings records across store objects', async () => {
+  it('migrates legacy savings records to a persisted v3 envelope across store objects', async () => {
     const records = [{ tokenSavings: { tokensLoaded: 2, tokensWholeFile: 10, savingsPct: 80 }, multi: false, collapsed: false }];
     await store.writeSavings(records);
-    expect(await new FileStore(dir).readSavings()).toEqual(records);
+    const savings = await new FileStore(dir).readSavings();
+    expect(savings).toMatchObject({ version: 3, records: [{ baselineTokens: 10, sentTokens: 2, savedTokens: 8 }], lifetime: { calls: 1, baselineTokens: 10, sentTokens: 2, savedTokens: 8, reductionPct: 80 }, sessionTotals: { legacy: { calls: 1, baselineTokens: 10, sentTokens: 2, savedTokens: 8, reductionPct: 80 } } });
+    await store.writeSavings({ records });
+    expect((await new FileStore(dir).readSavings()).lifetime).toMatchObject({ calls: 1, baselineTokens: 10, sentTokens: 2, savedTokens: 8 });
+  });
+
+  it('keeps cumulative savings totals after pruning record history', async () => {
+    for (let i = 0; i < 101; i++) await store.updateSavings({ baselineTokens: 10, sentTokens: 2, savedTokens: 8 });
+    const savings = await new FileStore(dir).readSavings();
+    expect(savings.records).toHaveLength(100);
+    expect(savings.lifetime).toEqual({ calls: 101, baselineTokens: 1010, sentTokens: 202, savedTokens: 808, reductionPct: 80 });
+    expect(savings.activeSession).toMatchObject({ calls: 101, baselineTokens: 1010, sentTokens: 202, savedTokens: 808, reductionPct: 80 });
+  });
+
+  it('persists cumulative totals for named sessions beyond capped history', async () => {
+    for (let i = 0; i < 120; i++) await store.updateSavings({ sessionId: i % 2 ? 'alpha' : 'beta', baselineTokens: 10, sentTokens: 2, savedTokens: 8 });
+    const savings = await new FileStore(dir).readSavings();
+    expect(savings.records).toHaveLength(100);
+    expect(savings.sessionTotals.alpha).toMatchObject({ calls: 60, baselineTokens: 600, sentTokens: 120, savedTokens: 480 });
+    expect(savings.sessionTotals.beta).toMatchObject({ calls: 60, baselineTokens: 600, sentTokens: 120, savedTokens: 480 });
+    expect((await new FileStore(dir).updateSavings({ sessionId: 'alpha' })).activeSession).toMatchObject({ id: 'alpha', calls: 60, savedTokens: 480 });
+  });
+
+  it('preserves savings when clearing the index and does not drop concurrent updates', async () => {
+    await store.updateSavings({ baselineTokens: 10, sentTokens: 2, savedTokens: 8 });
+    await store.writeIndex({ a: '1' });
+    await store.clearIndex();
+    expect(await store.readIndex()).toEqual({});
+    await Promise.all(Array.from({ length: 20 }, () => new FileStore(dir).updateSavings({ baselineTokens: 10, sentTokens: 4, savedTokens: 6 })));
+    expect((await new FileStore(dir).readSavings()).lifetime).toMatchObject({ calls: 21, baselineTokens: 210, sentTokens: 82, savedTokens: 128 });
+  });
+
+  it('recovers only stale, identifiable savings locks', async () => {
+    const lockPath = join(dir, '.savings.lock');
+    writeFileSync(lockPath, JSON.stringify({ token: 'abandoned', pid: 99_999_999, createdAt: Date.now() - 31_000 }));
+    await store.updateSavings({ baselineTokens: 10, sentTokens: 2, savedTokens: 8 });
+    expect(await store.readSavings()).toMatchObject({ lifetime: { calls: 1 } });
+
+    writeFileSync(lockPath, JSON.stringify({ token: 'active-owner', pid: process.pid, createdAt: Date.now() }));
+    await expect(store.updateSavings({ baselineTokens: 10, sentTokens: 2, savedTokens: 8 })).rejects.toThrow('savings lock timed out');
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ token: 'active-owner' });
+  });
+
+  it('cleans up the savings queue after completion and rejection', async () => {
+    const queues = (FileStore as unknown as { savingsQueues: Map<string, Promise<void>> }).savingsQueues;
+    await store.updateSavings({ baselineTokens: 10, sentTokens: 2, savedTokens: 8 });
+    expect(queues.has(dir)).toBe(false);
+
+    writeFileSync(store.savingsPath, 'not-json');
+    await expect(store.updateSavings()).rejects.toThrow();
+    expect(queues.has(dir)).toBe(false);
   });
 
   describe('atomic writes', () => {

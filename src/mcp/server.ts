@@ -22,7 +22,9 @@ import {
   handleLoadSection,
   handleSearchSkillSections,
   handleResolveTaskSections,
-  handleDoctor
+  handleGetTokenSavingsStats,
+  handleDoctor,
+  handleDiscoverSkillFolders
 } from './tools.js';
 import {
   validateIndexSkillsArgs,
@@ -30,19 +32,24 @@ import {
   validateGetSkillManifestArgs,
   validateGetSkillSectionsArgs,
   validateLoadSkillContextArgs,
-  validateLoadSectionArgs, validateSearchSkillSectionsArgs, validateResolveTaskSectionsArgs, validateDoctorArgs
+  validateLoadSectionArgs, validateSearchSkillSectionsArgs, validateResolveTaskSectionsArgs, validateTokenSavingsStatsArgs, validateDoctorArgs, validateDiscoverSkillFoldersArgs
 } from './schemas.js';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
 export const TOOL_DEFS = [
   {
+    name: 'discover_skill_folders',
+    description: 'Opt-in bounded discovery of known roots and literal lowercase skills directories under the project root, or home when scope is explicitly home. Does not read or index skill content.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: { scope: { type: 'string', enum: ['project', 'home'] }, maxDepth: { type: 'integer', minimum: 0, maximum: 10 }, limit: { type: 'integer', minimum: 1, maximum: 500 } } }
+  },
+  {
     name: 'index_skills',
     description: 'Discover, normalize, and compile skills from a source system into the local cache.',
     inputSchema: {
       type: 'object',
       properties: {
-        system: { type: 'string', enum: ['claude', 'opencode', 'codex', 'copilot'] },
+        system: { type: 'string', enum: ['claude', 'opencode', 'codex', 'copilot', 'generic'] },
         roots: { type: 'array', items: { type: 'string' } },
         baseDir: { type: 'string' },
         force: { type: 'boolean' }
@@ -56,7 +63,7 @@ export const TOOL_DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        system: { type: 'string', enum: ['claude', 'opencode', 'codex', 'copilot'] }
+        system: { type: 'string', enum: ['claude', 'opencode', 'codex', 'copilot', 'generic'] }
       }
     }
   },
@@ -114,7 +121,12 @@ export const TOOL_DEFS = [
   {
     name: 'resolve_task_sections',
     description: 'Resolve task sections and dependencies. With phase, deliberately AND-filters to phase-class sections that lexically match the phase, then resolves by query; this differs from load_skill_context.',
-    inputSchema: { type: 'object', properties: { query: { type: 'string' }, phase: { type: 'string' }, skill: { type: 'string' }, budget: { type: 'number', exclusiveMinimum: 0 } }, required: ['query'] }
+    inputSchema: { type: 'object', properties: { query: { type: 'string' }, phase: { type: 'string' }, skill: { type: 'string' }, budget: { type: 'number', exclusiveMinimum: 0 }, includeSoft: { type: 'boolean' }, sessionId: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$' }, newSession: { type: 'boolean' } }, required: ['query'] }
+  },
+  {
+    name: 'get_token_savings_stats',
+    description: 'Return local Ruleloom estimated token proxy totals. No provider, billing, or cost data is used.',
+    inputSchema: { type: 'object', properties: { sessionId: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$' }, newSession: { type: 'boolean' } } }
   },
   {
     name: 'doctor',
@@ -174,6 +186,11 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
 
     try {
       switch (name) {
+        case 'discover_skill_folders': {
+          const v = validateDiscoverSkillFoldersArgs(args ?? {});
+          if (!v.ok) return { content: [{ type: 'text', text: JSON.stringify({ errors: v.errors }) }], isError: true };
+          return { content: [{ type: 'text', text: await handleDiscoverSkillFolders(deps, v.value.scope, v.value.maxDepth, v.value.limit) }] };
+        }
         case 'index_skills': {
           const v = validateIndexSkillsArgs(args ?? {});
           if (!v.ok) return { content: [{ type: 'text', text: JSON.stringify({ errors: v.errors }) }], isError: true };
@@ -220,9 +237,15 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
         case 'resolve_task_sections': {
           const v = validateResolveTaskSectionsArgs(args ?? {});
           if (!v.ok) return { content: [{ type: 'text', text: JSON.stringify({ errors: v.errors }) }], isError: true };
-          const text = await handleResolveTaskSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.budget);
+          const text = await handleResolveTaskSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.budget, v.value.includeSoft, v.value.sessionId, v.value.newSession);
           const parsed = JSON.parse(text);
           return { content: [{ type: 'text', text }], ...(parsed.errors ? { isError: true } : {}) };
+        }
+        case 'get_token_savings_stats': {
+          const v = validateTokenSavingsStatsArgs(args ?? {});
+          if (!v.ok) return { content: [{ type: 'text', text: JSON.stringify({ errors: v.errors }) }], isError: true };
+          const text = await handleGetTokenSavingsStats(deps, v.value.sessionId, v.value.newSession);
+          return { content: [{ type: 'text', text }], ...(JSON.parse(text).errors ? { isError: true } : {}) };
         }
         case 'doctor': {
           const v = validateDoctorArgs(args ?? {});
@@ -250,6 +273,11 @@ export async function startMcpServer(opts: McpServerOptions = {}): Promise<void>
 export async function handleMcpToolCall(deps: ToolDeps, name: string, args: unknown = {}): Promise<any> {
   const error = (errors: string[]) => ({ content: [{ type: 'text' as const, text: JSON.stringify({ errors }) }], isError: true });
   try {
+    if (name === 'discover_skill_folders') {
+      const v = validateDiscoverSkillFoldersArgs(args);
+      if (!v.ok) return error(v.errors);
+      return { content: [{ type: 'text', text: await handleDiscoverSkillFolders(deps, v.value.scope, v.value.maxDepth, v.value.limit) }] };
+    }
     if (name === 'index_skills') {
       const v = validateIndexSkillsArgs(args);
       if (!v.ok) return error(v.errors);
@@ -276,9 +304,15 @@ export async function handleMcpToolCall(deps: ToolDeps, name: string, args: unkn
       const raw = args && typeof args === 'object' ? args as Record<string, unknown> : args;
       const v = validateResolveTaskSectionsArgs(raw);
       if (!v.ok) return error(v.errors);
-      const text = await handleResolveTaskSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.budget, (raw as Record<string, unknown>)?.includeSoft as boolean | undefined);
+       const text = await handleResolveTaskSections(deps, v.value.query, v.value.phase, v.value.skill, v.value.budget, v.value.includeSoft, v.value.sessionId, v.value.newSession);
       const parsed = JSON.parse(text);
       return { content: [{ type: 'text', text }], ...(parsed.errors ? { isError: true } : {}) };
+    }
+    if (name === 'get_token_savings_stats') {
+      const v = validateTokenSavingsStatsArgs(args);
+      if (!v.ok) return error(v.errors);
+      const text = await handleGetTokenSavingsStats(deps, v.value.sessionId, v.value.newSession);
+      return { content: [{ type: 'text', text }], ...(JSON.parse(text).errors ? { isError: true } : {}) };
     }
     if (name === 'doctor') {
       const v = validateDoctorArgs(args);

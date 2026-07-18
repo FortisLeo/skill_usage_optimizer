@@ -89,20 +89,32 @@ available after `npm run build`. `get skill#section` loads one section;
 `get skill` returns that skill's section list. Use `--json` for deterministic
 JSON output. `doctor` is read-only and exits 0 for clean, 1 for warnings, and 2
 for errors; MCP returns the same diagnostic report without an exit code.
-`stats` reports approximate process-local five-minute follow-up signals; this
-correlation resets on restart and is not true session correlation.
+`stats` reports persisted active-session and lifetime Ruleloom estimated token
+proxies. Use `--session-id ID` for an opaque caller-chosen session or
+`--new-session` to start one.
 
-Ruleloom exposes seven tools. Names are stable. Schemas are JSON Schema over the MCP `tools/call` method. Argument validation is strict and returns `{ errors: [...] }` for bad input rather than throwing.
+Ruleloom exposes MCP tools. Names are stable. Schemas are JSON Schema over the MCP `tools/call` method. Argument validation is strict and returns `{ errors: [...] }` for bad input rather than throwing.
 
 | Tool | Purpose |
 | --- | --- |
 | `index_skills` | Discover, normalize, and compile rule files for one system into the local cache. |
+| `discover_skill_folders` | Opt-in, bounded discovery of known roots and folders literally named `skills`. |
 | `list_skills` | Enumerate every indexed skill, with token counts and conflict counts. |
 | `get_skill_manifest` | Read the compiled manifest for one skill by ID. |
 | `get_skill_sections` | Read the section list (with class, policy, references) for one skill. |
 | `load_skill_context` | Retrieve minimal, policy-first context for a query, with budget controls. |
 | `load_section` | Load exactly one section by ID, plus its links and duplicate references. |
 | `doctor` | Read-only diagnostics for the indexed corpus. |
+| `get_token_savings_stats` | Return active-session and lifetime estimated token proxy totals. |
+
+`discover_skill_folders` never runs automatically, reads no skill content, and never indexes or compiles. An explicit call recursively checks only the project root by default, or the home directory only with `{ "scope": "home" }`. It finds supported canonical roots plus directories whose basename is exactly lowercase `skills` (case-sensitive), then reports exact `SKILL.md` or `skill.md` packages beneath them. It does not inspect arbitrary files, accept a custom discovery root, scan `/`, or crawl the full machine. Traversal skips common generated/private directories and symlinks and is bounded by depth, result, and scan-entry caps.
+Use `indexRoot` and `system` only when `indexable` is true. Known roots retain their harness system; unknown `skills` folders use `generic`. `indexRoot` is an absolute directory, including for `scope: "home"`; do not pass `candidate.path`, which is display-only and may name a file. Generic indexing is always explicit:
+
+```json
+{ "name": "discover_skill_folders", "arguments": {} }
+{ "name": "discover_skill_folders", "arguments": { "scope": "home" } }
+{ "name": "index_skills", "arguments": { "system": "generic", "roots": ["/absolute/indexRoot/from/candidate"] } }
+```
 
 Full schemas, input examples, and response shapes live in [docs/tool-reference.md](docs/tool-reference.md). If you are wiring Ruleloom into an agent, start with [docs/agent-guide.md](docs/agent-guide.md).
 
@@ -115,9 +127,16 @@ The MCP server writes to `<cwd>/.skill-cache/` by default. You can override that
   index.json          # sectionId -> content hash
   manifests.json      # skillId -> SkillManifest
   sections/           # one JSON file per section, base64url(id).json
+  savings.json         # v3 local totals, opaque per-session aggregates, and last 100 records
 ```
 
 `index.json` and `manifests.json` are written atomically (temp + rename). Treat the directory as Ruleloom's. Don't edit it by hand.
+
+Token savings are local, persisted Ruleloom estimates: whole-skill token estimate
+minus the sections loaded. They are not provider usage, billing, or cost data.
+The cache stores no query/task text, returned content, host user ID, or other
+user identifier; only opaque session IDs, their aggregate token totals, and up to
+100 metric records are kept.
 
 ## Verification
 
