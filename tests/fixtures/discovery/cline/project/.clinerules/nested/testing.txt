@@ -1,0 +1,3 @@
+# Testing rules
+
+Run focused tests.

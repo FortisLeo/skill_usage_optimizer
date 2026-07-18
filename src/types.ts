@@ -1,4 +1,5 @@
-export type SourceSystem = 'claude' | 'opencode' | 'codex' | 'copilot' | 'generic';
+export const SOURCE_SYSTEMS = ['claude', 'opencode', 'codex', 'copilot', 'cursor', 'gemini', 'windsurf', 'cline', 'roo', 'continue', 'aider', 'generic'] as const;
+export type SourceSystem = typeof SOURCE_SYSTEMS[number];
 
 export type SectionClass = 'always' | 'phase' | 'on_demand' | 'reference';
 
@@ -23,6 +24,21 @@ export interface SkillConflictDiagnostic {
   winnerPrecedence: number;
 }
 
+export interface DiscoveryDiagnostic {
+  environment: SourceSystem;
+  capability: 'roots' | 'configuration' | 'runtime_bridge';
+  sourceType: 'roots' | 'configuration' | 'runtime' | 'explicit';
+  status: 'used' | 'fallback' | 'unavailable' | 'limited' | 'truncated' | 'skipped';
+  code:
+    | 'SOURCE_USED' | 'SOURCE_ABSENT' | 'SOURCE_UNAVAILABLE'
+    | 'SOURCE_UNSUPPORTED' | 'SOURCE_INVALID' | 'SOURCE_UNSAFE'
+    | 'SOURCE_INACCESSIBLE' | 'SOURCE_TRUNCATED' | 'WORKSPACE_MISMATCH';
+  foundCount: number;
+  skippedCount: number;
+  limitation: string;
+  explicitRootGuidance: string;
+}
+
 export interface DiscoveryContext {
   workspaceRoot: string;
   repoRoot: string | null;
@@ -31,6 +47,8 @@ export interface DiscoveryContext {
   includeGlobals: boolean;
   includeSystem: boolean;
   explicitRoots: string[];
+  /** Limit adapter dispatch for a system-specific index request. */
+  requestedSystem?: SourceSystem;
   /** Attribute arbitrary explicit roots to this system; heuristic fallback still applies when absent. */
   explicitRootSystem?: SourceSystem;
   /** Test seam: override the Codex system skills directory. Defaults to /etc/codex/skills. */
@@ -45,7 +63,7 @@ export interface DiscoveredArtifact {
   rootOrigin: string;
   precedence: number;
   configIndirection: string | null;
-  rawStat: { mtimeMs: number; size: number };
+  rawStat: { mtimeMs: number; size: number; dev?: number; ino?: number; ctimeMs?: number };
 }
 
 export interface NormalizedSkillInput {
@@ -126,6 +144,7 @@ export type BoundaryError = { path: string; error: string };
 export interface DiscoverResult {
   artifacts: DiscoveredArtifact[];
   errors: BoundaryError[];
+  discoveryDiagnostics?: DiscoveryDiagnostic[];
 }
 
 export interface NormalizeResult {

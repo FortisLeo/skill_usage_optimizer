@@ -1,0 +1,4 @@
+{
+  // Roo's documented stable VS Code setting.
+  "roo-cline.useAgentRules": true
+}

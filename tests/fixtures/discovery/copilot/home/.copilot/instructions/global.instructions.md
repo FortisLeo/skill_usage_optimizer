@@ -1,0 +1,4 @@
+---
+applyTo: "**"
+---
+# Personal instructions

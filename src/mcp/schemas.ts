@@ -1,7 +1,7 @@
 // ponytail: manual validators for MCP tool arguments — no zod
-import type { SourceSystem } from '../types.js';
+import { SOURCE_SYSTEMS, type SourceSystem } from '../types.js';
 
-const VALID_SYSTEMS = new Set<string>(['claude', 'opencode', 'codex', 'copilot', 'generic']);
+const VALID_SYSTEMS = new Set<string>(SOURCE_SYSTEMS);
 
 function isSourceSystem(v: unknown): v is SourceSystem {
   return typeof v === 'string' && VALID_SYSTEMS.has(v);
@@ -75,7 +75,7 @@ export function validateIndexSkillsArgs(raw: unknown): {
   const a = raw as Record<string, unknown>;
 
   if (!isSourceSystem(a.system)) {
-    errors.push(`system must be one of: ${[...VALID_SYSTEMS].join(', ')}`);
+    errors.push(`system must be one of: ${SOURCE_SYSTEMS.join(', ')}`);
   }
 
   let roots: string[] | undefined;
@@ -120,7 +120,7 @@ export function validateListSkillsArgs(raw: unknown): {
   const a = raw as Record<string, unknown>;
 
   if (a.system !== undefined && !isSourceSystem(a.system)) {
-    return { ok: false, errors: [`system must be one of: ${[...VALID_SYSTEMS].join(', ')}`] };
+    return { ok: false, errors: [`system must be one of: ${SOURCE_SYSTEMS.join(', ')}`] };
   }
 
   return { ok: true, value: { system: a.system as SourceSystem | undefined } };

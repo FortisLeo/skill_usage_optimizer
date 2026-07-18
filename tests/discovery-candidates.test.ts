@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { candidateDiscoveryDefaults, discoverSkillFolders, normalizeRelativePath } from '../src/discovery/candidates.js';
+import { SOURCE_SYSTEMS } from '../src/types.js';
 
 const linkDirectory = (target: string, path: string) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
 
@@ -14,7 +15,7 @@ describe('discoverSkillFolders', () => {
   it('finds known roots, generic skills directories, and root instructions without reading content', () => {
     const root = mkdtempSync(join(tmpdir(), 'candidate-discovery-'));
     try {
-      for (const dir of ['.claude/skills/demo', '.claude/commands', '.opencode/skills/lowercase', '.opencode/rules', '.codex/agents', '.github/copilot', '.github/instructions', '.cursor/rules', 'arbitrary/nested/skills/demo']) mkdirSync(join(root, dir), { recursive: true });
+      for (const dir of ['.claude/skills/demo', '.claude/commands', '.opencode/skills/lowercase', '.agents/skills/compatible', '.opencode/rules', '.github/skills/copilot', '.github/instructions', '.cursor/rules', 'arbitrary/nested/skills/demo']) mkdirSync(join(root, dir), { recursive: true });
       writeFileSync(join(root, '.claude', 'skills', 'demo', 'SKILL.md'), 'secret content');
       writeFileSync(join(root, '.opencode', 'skills', 'lowercase', 'skill.md'), 'also secret');
       writeFileSync(join(root, 'arbitrary', 'nested', 'skills', 'demo', 'SKILL.md'), 'must be found without being read');
@@ -26,28 +27,37 @@ describe('discoverSkillFolders', () => {
         expect.objectContaining({ path: '.claude/commands', system: 'claude', indexable: true, indexRoot: join(indexRoot, '.claude', 'commands') }),
         expect.objectContaining({ path: '.claude/skills/demo/SKILL.md', system: 'claude', indexable: true, indexRoot: join(indexRoot, '.claude', 'skills', 'demo') }),
         expect.objectContaining({ path: '.opencode/skills/lowercase/skill.md', system: 'opencode', indexable: true, indexRoot: join(indexRoot, '.opencode', 'skills', 'lowercase') }),
-        expect.objectContaining({ path: '.opencode/rules', system: 'opencode', indexable: true }),
-        expect.objectContaining({ path: '.codex/agents', system: 'codex', indexable: true }),
-        expect.objectContaining({ path: '.github/copilot', system: 'copilot', indexable: true }),
+        expect.objectContaining({ path: '.agents/skills', system: 'opencode', indexable: true }),
+        expect.objectContaining({ path: '.agents/skills', system: 'codex', indexable: true }),
+        expect.objectContaining({ path: '.github/skills', system: 'copilot', indexable: true }),
         expect.objectContaining({ path: '.github/instructions', system: 'copilot', indexable: true }),
+        expect.objectContaining({ path: '.cursor/rules', system: 'cursor', indexable: true }),
         expect.objectContaining({ path: 'arbitrary/nested/skills', system: 'generic', indexable: true, indexRoot: join(indexRoot, 'arbitrary', 'nested', 'skills'), matchedBy: 'skills_directory' }),
         expect.objectContaining({ path: 'arbitrary/nested/skills/demo/SKILL.md', system: 'generic', indexRoot: join(indexRoot, 'arbitrary', 'nested', 'skills', 'demo') }),
-        expect.objectContaining({ path: 'AGENTS.md', system: 'claude', indexable: false, kind: 'instruction_file' }),
+        expect.objectContaining({ path: 'AGENTS.md', system: 'opencode', indexable: false, kind: 'instruction_file' }),
+        expect.objectContaining({ path: 'AGENTS.md', system: 'codex', indexable: false, kind: 'instruction_file' }),
         expect.objectContaining({ path: 'CLAUDE.md', system: 'claude', indexable: false, kind: 'instruction_file' }),
         expect.objectContaining({ path: '.github/copilot-instructions.md', system: 'copilot', indexable: false, kind: 'instruction_file' })
       ]));
-      expect(result.candidates.some(c => c.path.startsWith('.cursor/'))).toBe(false);
-      expect(result.candidates.every(c => ['claude', 'opencode', 'codex', 'copilot', 'generic'].includes(c.system) && (!c.indexable || typeof c.indexRoot === 'string'))).toBe(true);
+      expect(result.candidates.some(c => c.path.startsWith('.cursor/commands'))).toBe(false);
+      expect(result.candidates.some(c => c.path === '.opencode/rules')).toBe(false);
+      expect(result.candidates.every(c => SOURCE_SYSTEMS.includes(c.system) && (!c.indexable || typeof c.indexRoot === 'string'))).toBe(true);
       expect(JSON.stringify(result)).not.toContain('secret content');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('finds every supported home root, including config opencode skills', () => {
+  it('finds every supported home root, including OpenCode-compatible roots', () => {
     const root = mkdtempSync(join(tmpdir(), 'candidate-home-'));
     try {
-      for (const dir of ['.claude/skills', '.opencode/skills', '.config/opencode/skills', '.codex/skills', '.github/copilot']) mkdirSync(join(root, dir), { recursive: true });
+      for (const dir of ['.claude/skills', '.opencode/skills', '.config/opencode/skills', '.config/opencode/skill', '.agents/skills', '.copilot/skills', '.copilot/instructions', '.copilot/agents', '.cursor/skills', '.cursor/rules', '.gemini/skills']) mkdirSync(join(root, dir), { recursive: true });
       const result = discoverSkillFolders(root, 'home');
-      expect(result.candidates.map(c => c.path)).toEqual(['.claude/skills', '.opencode/skills', '.config/opencode/skills', '.codex/skills', '.github/copilot']);
+      expect(result.candidates.map(c => `${c.system}:${c.path}`)).toEqual(expect.arrayContaining([
+        'claude:.claude/skills', 'opencode:.config/opencode/skills', 'opencode:.config/opencode/skill',
+        'opencode:.claude/skills', 'opencode:.agents/skills', 'codex:.agents/skills',
+        'copilot:.copilot/skills', 'copilot:.copilot/instructions', 'copilot:.copilot/agents',
+        'cursor:.cursor/skills', 'cursor:.claude/skills', 'cursor:.agents/skills',
+        'gemini:.gemini/skills', 'gemini:.agents/skills'
+      ]));
       expect(result.candidates.every(c => c.indexable && typeof c.indexRoot === 'string')).toBe(true);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
@@ -66,7 +76,13 @@ describe('discoverSkillFolders', () => {
       linkDirectory(join(root, 'internal-target'), join(root, '.claude', 'skills', 'internal-link'));
       linkDirectory(outside, join(root, '.claude', 'skills', 'escape-link'));
       const shallow = discoverSkillFolders(root, 'project', 1);
-      expect(shallow.candidates).toEqual([expect.objectContaining({ path: '.claude/skills' })]);
+      expect(shallow.candidates).toEqual([
+        expect.objectContaining({ path: '.claude/skills', system: 'claude' }),
+        expect.objectContaining({ path: '.claude/skills', system: 'opencode' }),
+        expect.objectContaining({ path: '.claude/skills', system: 'copilot' }),
+        expect.objectContaining({ path: '.claude/skills', system: 'cursor' }),
+        expect.objectContaining({ path: '.claude/skills', system: 'cline' })
+      ]);
       const capped = discoverSkillFolders(root, 'project', 5, 1);
       expect(capped.truncated).toBe(true);
       const uncapped = discoverSkillFolders(root, 'project', 5, 100);
@@ -74,7 +90,7 @@ describe('discoverSkillFolders', () => {
     } finally { rmSync(root, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
   });
 
-  it('keeps known skills roots mapped once to their harness', () => {
+  it('keeps known skills roots mapped to native and documented compatible harnesses', () => {
     const root = mkdtempSync(join(tmpdir(), 'candidate-dedup-'));
     try {
       mkdirSync(join(root, '.claude', 'skills', 'demo'), { recursive: true });
@@ -83,7 +99,13 @@ describe('discoverSkillFolders', () => {
       const candidates = result.candidates;
       const knownRoot = join(result.root, '.claude', 'skills');
       const matches = candidates.filter(c => c.indexRoot === knownRoot);
-      expect(matches).toEqual([expect.objectContaining({ system: 'claude', matchedBy: 'known_harness_path' })]);
+      expect(matches).toEqual([
+        expect.objectContaining({ system: 'claude', matchedBy: 'known_harness_path' }),
+        expect.objectContaining({ system: 'opencode', matchedBy: 'known_harness_path' }),
+        expect.objectContaining({ system: 'copilot', matchedBy: 'known_harness_path' }),
+        expect.objectContaining({ system: 'cursor', matchedBy: 'known_harness_path' }),
+        expect.objectContaining({ system: 'cline', matchedBy: 'known_harness_path' })
+      ]);
       expect(candidates.some(c => c.system === 'generic' && c.indexRoot === knownRoot)).toBe(false);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
@@ -124,26 +146,41 @@ describe('discoverSkillFolders', () => {
       }
       mkdirSync(join(root, '.config/opencode/skills/demo'), { recursive: true });
       writeFileSync(join(root, '.config/opencode/skills/demo/SKILL.md'), '# demo');
-      mkdirSync(join(root, '.local/share/skills/demo'), { recursive: true });
-      writeFileSync(join(root, '.local/share/skills/demo/SKILL.md'), '# demo');
       const paths = discoverSkillFolders(root, 'home', 5, 100, 10_000, platform).candidates.map(c => c.path);
       expect(paths).toContain('.config/opencode/skills/demo/SKILL.md');
-      expect(paths).toContain('.local/share/skills/demo/SKILL.md');
       for (const dir of excluded) expect(paths.some(path => path.startsWith(`${dir}/`))).toBe(false);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('keeps Linux .local traversal and excludes only its exact Trash path', () => {
-    const root = mkdtempSync(join(tmpdir(), 'candidate-linux-trash-'));
+  it('does not enter hidden home directories except dedicated Gemini and Roo paths', () => {
+    const root = mkdtempSync(join(tmpdir(), 'candidate-hidden-home-'));
     try {
-      for (const dir of ['.local/skills/demo', '.local/share/skills/demo', '.local/share/Trash/skills/bad']) {
+      for (const dir of ['.ssh', '.aws', '.gnupg', '.config-unrelated', '.local-unrelated', '.local/share']) {
+        mkdirSync(join(root, dir, 'skills', 'demo'), { recursive: true });
+        writeFileSync(join(root, dir, 'skills', 'demo', 'SKILL.md'), '# skill');
+      }
+      for (const dir of ['.claude/skills/direct', '.config/opencode/skills/direct', '.gemini/skills/direct', '.agents/skills/direct', '.roo/skills-code/mode', '.roo/rules-code', '.agents/skills-code/mode']) {
         mkdirSync(join(root, dir), { recursive: true });
         writeFileSync(join(root, dir, 'SKILL.md'), '# skill');
       }
+      mkdirSync(join(root, '.gemini/extensions/verified/skills/extension'), { recursive: true });
+      writeFileSync(join(root, '.gemini/extensions/verified/gemini-extension.json'), '{}');
+      writeFileSync(join(root, '.gemini/extensions/verified/skills/extension/SKILL.md'), '# skill');
       const paths = discoverSkillFolders(root, 'home', 5, 100, 10_000, 'linux').candidates.map(c => c.path);
-      expect(paths).toContain('.local/skills/demo/SKILL.md');
-      expect(paths).toContain('.local/share/skills/demo/SKILL.md');
-      expect(paths.some(path => path.startsWith('.local/share/Trash/'))).toBe(false);
+      expect(paths).toEqual(expect.arrayContaining([
+        '.claude/skills', '.claude/skills/direct/SKILL.md',
+        '.config/opencode/skills', '.config/opencode/skills/direct/SKILL.md',
+        '.gemini/skills', '.gemini/skills/direct/SKILL.md',
+        '.agents/skills', '.agents/skills/direct/SKILL.md',
+        '.gemini/extensions/verified/skills', '.gemini/extensions/verified/skills/extension/SKILL.md',
+        '.roo/skills-code', '.roo/rules-code', '.agents/skills-code'
+      ]));
+      expect(paths.some(path => path === '.roo/skills-code/mode/SKILL.md' || path === '.agents/skills-code/mode/SKILL.md')).toBe(false);
+      const keys = discoverSkillFolders(root, 'home', 5, 100, 10_000, 'linux').candidates.map(candidate => `${candidate.system}:${candidate.path}`);
+      expect(new Set(keys).size).toBe(keys.length);
+      for (const dir of ['.ssh', '.aws', '.gnupg', '.config-unrelated', '.local-unrelated', '.local']) {
+        expect(paths.some(path => path.startsWith(`${dir}/`))).toBe(false);
+      }
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

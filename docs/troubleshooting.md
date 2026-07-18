@@ -22,14 +22,14 @@ A quick way to confirm Ruleloom itself is fine: run `node /absolute/path/to/rule
 
 ```json
 {
-  "errors": ["section \"X\" source changed; rerun index_skills"],
+  "freshness": "stale",
   "rebuildRequired": { "code": "REBUILD_REQUIRED", "action": "index_skills", "sectionIds": ["X"], "manifestIds": ["Y"], "reason": "source_changed" }
 }
 ```
 
-**Cause.** A rule file on disk was edited, added, or removed after the last `index_skills` call. Ruleloom is refusing to return cached content that no longer matches the source.
+**Cause.** A rule file on disk was edited, added, or removed after the last `index_skills` call. Ruleloom returns bounded rebuild metadata without rereading or returning changed source content.
 
-**Fix.** Call `index_skills` for the affected system. If the change is structural (you renamed a skill, moved rule files between directories), pass `force: true` to wipe the cache for that system first:
+**Fix.** Call `index_skills` for the affected system. If you need to bypass reuse and rewrite that system's records, pass `force: true`. Force preserves other systems and savings and produces the same final requested-system slice as a normal successful reindex:
 
 ```json
 { "name": "index_skills", "arguments": { "system": "claude", "force": true } }
@@ -43,18 +43,201 @@ After the rebuild, retry the read. The `rebuildRequired` envelope goes away.
 
 **Causes and fixes.**
 
-1. **Wrong system.** Rule files for Claude go under `.claude/`. Rule files for OpenCode go under `.opencode/`. Rule files for Copilot go under `.github/copilot/` or `.github/instructions/`. If you indexed `claude` and your rules are under `.opencode/`, you indexed the wrong system. Re-index with the matching system.
+1. **Wrong system.** Rule files for Claude go under `.claude/`. Rule files for OpenCode go under `.opencode/`. Rule files for Copilot go under `.github/copilot/` or `.github/instructions/`. Cursor rules go under `.cursor/rules/`. Gemini CLI skills go under `.gemini/skills/` or `.agents/skills/`. Current Devin Desktop rules go under `.devin/rules/`, with legacy Windsurf fallbacks under `.windsurf/rules/` or `.windsurfrules`. Cline rules go under `.clinerules` or `.cline/rules/`. Roo Code rules go under `.roo/rules/` or `.roo/rules-{mode}/`. Continue workspace rules go under `.continue/rules/`. Aider has no native skills directory and requires supported `.aider.conf.yml` `read:` entries or explicit roots. If you indexed `claude` and your rules are under `.opencode/`, you indexed the wrong system. Re-index with the matching system.
 2. **Wrong working directory.** Ruleloom uses the MCP process's `cwd` as the workspace root. If the harness launched Ruleloom from a directory that isn't the project root, the discovery scan sees no rule files. Pass `baseDir` explicitly:
 
    ```json
    { "name": "index_skills", "arguments": { "system": "claude", "baseDir": "/Users/me/code/myproject" } }
    ```
 3. **Globals only.** If you expected global rules (under `~/.claude/`, `~/.config/opencode/`) to show up, remember that global discovery is controlled by the server/indexing configuration. If you only see global rules and not workspace rules, the workspace discovery failed. Check the `baseDir`.
-4. **Rule file naming.** Ruleloom recognizes `SKILL.md`, `skill.md`, `instructions.md`, `rules.md`. If your rule file has a different name, it is not picked up. Either rename the file, or pass `roots` to point at it directly:
+4. **Rule file naming.** Ruleloom recognizes `SKILL.md`, `skill.md`, `instructions.md`, `rules.md`. If your rule file has a different name, it is not picked up. Either rename the file, or pass its containing directory in `roots`. Explicit roots are directory-only:
 
    ```json
-   { "name": "index_skills", "arguments": { "system": "claude", "roots": ["/abs/path/to/CUSTOM_RULES.md"] } }
+   { "name": "index_skills", "arguments": { "system": "claude", "roots": ["/abs/path/to"] } }
    ```
+
+### Claude Code plugin or added-directory sources are missing
+
+The Claude adapter indexes documented project, nested, and user skills, legacy
+commands, rules, and `CLAUDE.md` instruction files. It intentionally does not
+crawl `~/.claude/plugins`, caches, dependencies, managed policy, `--add-dir`
+sources, or runtime state. A `SOURCE_UNSUPPORTED` configuration diagnostic is
+expected. Pass a trusted local source directory explicitly:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "claude", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+### OpenCode runtime or configured paths are missing
+
+The shipped OpenCode adapter is documented-roots only. It indexes project and
+global `.opencode`, `.agents`, and Claude-compatible skill roots plus the
+documented `AGENTS.md`/`CLAUDE.md` fallbacks. It does not inspect OpenCode's
+package cache, `node_modules`, plugin-merged `config.skills.paths`, or configured
+instruction globs/URLs. A `SOURCE_UNSUPPORTED` discovery diagnostic is expected;
+pass each trusted local directory explicitly instead:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "opencode", "roots": ["/absolute/trusted/skill-root"] } }
+```
+
+Runtime-effective coverage needs the separately verified bridge writer and
+reader and is not provided by this adapter.
+
+### Codex configured, plugin, or bundled sources are missing
+
+The Codex adapter indexes the documented AGENTS hierarchy, `.agents/skills`,
+and `.codex/agents` from supplied project/user paths. `/etc/codex/skills` is
+available only when system discovery is explicitly enabled. Configured fallback
+instruction names, alternate `CODEX_HOME`, bundled skills, plugin-installed
+sources, and runtime-effective state have no supported discovery handoff here;
+a non-fatal `SOURCE_UNSUPPORTED` diagnostic is expected. Pass each trusted
+local directory explicitly instead:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "codex", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+### Copilot/VS Code profile, organization, or runtime sources are missing
+
+The Copilot adapter indexes confirmed repository and personal filesystem roots.
+VS Code profile user data, configured `chat.*FilesLocations`, Settings Sync,
+organization/extension sources, experimental nested `AGENTS.md`, and the UI-only
+Chat Diagnostics/Agent Debug Logs have no stable portable reader here. A
+`SOURCE_UNSUPPORTED` configuration diagnostic is expected. Ruleloom preserves
+`applyTo`/`paths` frontmatter but cannot decide those scopes without a target
+file. Pass each trusted readable directory explicitly:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "copilot", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+### Cursor user/team rules, commands, or runtime sources are missing
+
+The Cursor adapter indexes project `.cursor/rules/**/*.mdc`, root
+`AGENTS.md`/`CLAUDE.md`, legacy `.cursorrules`, and the documented project/user
+skill roots. Cursor user rules are settings-managed, and current official docs
+do not expose a stable portable readable path for user/team rules or commands.
+Ruleloom therefore does not scan `.cursor/commands`, private editor storage,
+plugins, settings, enabled state, or runtime-effective context. A non-fatal
+`SOURCE_UNSUPPORTED` configuration diagnostic is expected. Path metadata is
+preserved during normalization but cannot be applied without a target file.
+Pass each trusted readable directory explicitly:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "cursor", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+### Gemini CLI linked, disabled, custom-context, or runtime sources are missing
+
+The Gemini adapter indexes `.gemini/skills`, `.agents/skills`, the supplied
+`GEMINI.md` hierarchy, and regular installed-extension `skills/` roots directly
+under `~/.gemini/extensions`. It does not invoke `/skills list` or `gemini skills
+list`, inspect runtime metadata, follow linked extension symlinks, apply enabled
+or disabled state, resolve custom `context.fileName`, expand imports, or recreate
+just-in-time context. A `SOURCE_UNSUPPORTED` configuration diagnostic is
+expected. Pass each trusted real directory explicitly:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "gemini", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+The official Gemini CLI documentation currently announces an unpaid-tier and
+Google One migration to Antigravity CLI. The `gemini` adapter does not claim
+Antigravity compatibility.
+
+### Devin Desktop / Windsurf memories, system rules, or runtime context are missing
+
+The `windsurf` adapter uses the current Devin Desktop contract: `.devin/rules`
+first, documented `.windsurf/rules` and `.windsurfrules` compatibility, the
+workspace `AGENTS.md` hierarchy, and only the current documented global rule
+file at `~/.codeium/windsurf/memories/global_rules.md`. Other memory files are
+auto-generated private workspace state and are intentionally not crawled.
+Enterprise system rules, application `globalStorage`, caches, activation state,
+and final prompts are also excluded and produce a bounded `SOURCE_UNSUPPORTED`
+diagnostic. Pass a trusted readable fallback directory explicitly:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "windsurf", "roots": ["/absolute/trusted/rule-root"] } }
+```
+
+### Cline mode, toggle, custom-data, or runtime sources are missing
+
+The `cline` adapter indexes the documented workspace `.clinerules` file or
+directory, `.cline/rules`, compatibility instruction files, and current/legacy
+skill roots. Global discovery includes the documented `~/.cline/rules`,
+`~/.cline/skills`, `~/Documents/Cline/Rules`, and `~/.agents/AGENTS.md` paths.
+
+Current Cline docs describe Plan and Act behavior, but not separate readable
+mode-specific instruction roots. Rule toggles, remote rules, private
+extension/settings state, `CLINE_DATA_DIR`, CLI `--data-dir`/`--config`
+overrides, and runtime-effective prompts are therefore not inferred. Settings
+files may contain credentials and are never indexed. A non-fatal
+`SOURCE_UNSUPPORTED` diagnostic is expected. Pass a trusted custom rules or
+skills directory explicitly:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "cline", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+### Roo Code mode, UI, profile, or runtime sources are missing
+
+The `roo` adapter targets Roo Code's final official v3.54.0 filesystem
+contract. It indexes global/workspace generic and mode-specific rules and
+skills, root `AGENTS.md`/`AGENT.md`, and `.roorules` fallbacks. Because an
+index request has no verified active-mode input, every present mode-specific
+root is retained explicitly rather than guessed or filtered.
+
+Only `roo-cline.useAgentRules` is read from the standard VS Code user and
+workspace `settings.json` locations. Active profiles, multi-root workspace
+files, remote/policy settings, UI custom instructions, `.roomodes`
+`customInstructions`, private extension storage, task state, and final prompts
+are not reconstructed. A `SOURCE_UNSUPPORTED` diagnostic is expected. Pass a
+trusted real directory explicitly when a readable source is outside the
+confirmed roots:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "roo", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+### Continue user rules, config entries, or runtime state are missing
+
+The `continue` adapter indexes workspace `.continue/rules/**/*.md` and local
+Markdown files referenced by canonical `file://` URLs in the active
+`~/.continue/config.yaml` (`schema: v1`), with deprecated `config.json` used
+only when YAML is absent. It never indexes the whole config, so model keys and
+unrelated settings stay out of Ruleloom. Inline rules/prompts, remote Hub
+blocks, non-Markdown entries, deprecated programmable/workspace configs,
+private state, current toolbar selection, and composed system messages are not
+reconstructed. Malformed config is skipped non-fatally with `SOURCE_INVALID`;
+unsupported runtime composition emits `SOURCE_UNSUPPORTED`.
+
+Move a reusable rule or prompt into a trusted Markdown file and reference it
+from Continue with a local `file://` URL, or pass its containing directory:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "continue", "roots": ["/absolute/trusted/source-root"] } }
+```
+
+### Aider conventions, config references, or session files are missing
+
+The `aider` adapter supports `read:` string/list entries from `.aider.conf.yml`
+at the supplied home, repository, and workspace/current-directory locations.
+Aider has no native skills directory, so Ruleloom does not guess
+`CONVENTIONS.md` or other filenames. Relative references resolve from the
+supplied Ruleloom workspace/base directory; use the same directory used to
+launch Aider.
+
+Session `/read` state, CLI/environment `--read`, alternate `--config` files,
+configured directories, command files, histories, caches, and final prompts are
+not observable. Missing, malformed, unsafe, symlinked, oversized, or over-limit
+references are skipped non-fatally with bounded diagnostics. Put durable
+instructions in a regular file listed by `read:`, or pass its trusted containing
+directory explicitly:
+
+```json
+{ "name": "index_skills", "arguments": { "system": "aider", "roots": ["/absolute/trusted/source-root"] } }
+```
 
 ## Windows: `npx` not found
 

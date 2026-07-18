@@ -1,0 +1,1 @@
+# Personal Claude compatibility

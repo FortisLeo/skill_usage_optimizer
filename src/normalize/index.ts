@@ -1,9 +1,10 @@
-import { readFileSync, statSync } from 'node:fs';
 import { basename, extname, dirname } from 'node:path';
 import YAML from 'yaml';
 import type { BoundaryError, DiscoveredArtifact, DiscoveryContext, NormalizeResult, NormalizedSkillInput } from '../types.js';
 import { computeHash, normalizeContent } from '../fs/freshness.js';
 import { isPathSafe, collectAllowedRoots } from '../fs/roots.js';
+import { readBoundedSource } from '../fs/safeSource.js';
+import { scannerLimits } from '../discovery/shared.js';
 
 export function normalize(
   artifacts: DiscoveredArtifact[],
@@ -28,12 +29,10 @@ export function normalize(
 
     try {
       // Normalize all input bytes once so parsing, rawMarkdown, and sourceHash agree.
-      const raw = readFileSync(a.absolutePath, 'utf-8');
+      const { content: raw, stat: freshStat } = readBoundedSource(a.absolutePath, allowedRoots, scannerLimits.fileBytes, a.rawStat);
       const content = normalizeContent(raw);
       const { frontmatter, body } = extractSimpleFrontmatter(content);
       const sourceHash = computeHash(content);
-      const freshStat = statSync(a.absolutePath);
-
       inputs.push({
         system: a.system,
         kind: a.kind,

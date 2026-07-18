@@ -38,7 +38,5 @@ export function normalizeContent(content: string): string {
 }
 
 export function isStale(stored: FreshnessEntry, current: FreshnessEntry): boolean {
-  if (stored.hash !== current.hash) return true;
-  if (stored.mtimeMs !== current.mtimeMs) return true;
-  return stored.size !== current.size;
+  return stored.hash !== current.hash;
 }

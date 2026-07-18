@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { TOOL_DEFS, handleMcpToolCall } from '../src/mcp/server.js';
 import { validateDiscoverSkillFoldersArgs, validateIndexSkillsArgs, validateResolveTaskSectionsArgs, validateSearchSkillSectionsArgs } from '../src/mcp/schemas.js';
 import { handleGetTokenSavingsStats, handleResolveTaskSections, handleSearchSkillSections, handleLoadSkillContext, handleLoadSection } from '../src/mcp/tools.js';
@@ -12,13 +12,16 @@ import type { SkillManifest, SkillSection } from '../src/types.js';
 import { fileURLToPath } from 'node:url';
 import { computeHash, normalizeContent } from '../src/fs/freshness.js';
 import { searchSections } from '../src/search/lexical.js';
+import { materializeIndexFixture } from './testUtils.js';
 
-const sections: SkillSection[] = [
+const fixture = materializeIndexFixture([
   { id: 'a::one', title: 'Planning setup', content: 'setup query', hash: 'a', class: 'phase', manifestId: 'claude::a::hash', tokenCount: 2 },
   { id: 'a::two', title: 'Review setup', content: 'setup query', hash: 'b', class: 'phase', manifestId: 'claude::a::hash', tokenCount: 2 },
   { id: 'a::always', title: 'Always', content: 'query', hash: 'c', class: 'always', manifestId: 'claude::a::hash', tokenCount: 1 }
-];
-const manifests: Record<string, SkillManifest> = { 'claude::a::hash': { id: 'claude::a::hash', skillName: 'a', system: 'claude', kind: 'skill_package', description: null, sourcePath: 'a', sourceHash: 'a', sections: [], tokenCount: 10, byteLength: 1 } };
+], { 'claude::a::hash': { id: 'claude::a::hash', skillName: 'a', system: 'claude', kind: 'skill_package', description: null, sourcePath: 'a', sourceHash: 'a', sections: [], tokenCount: 10, byteLength: 1 } });
+const { sections, manifests } = fixture;
+const fixtureCleanups = [fixture.cleanup];
+afterAll(() => fixtureCleanups.forEach(cleanup => cleanup()));
 const deps = { store: { readIndex: async () => Object.fromEntries(sections.map(s => [s.id, s.hash])), writeIndex: async () => {}, readSections: async (ids: string[]) => new Map(sections.filter(s => ids.includes(s.id)).map(s => [s.id, s])), writeSections: async () => {}, readManifests: async () => manifests, writeManifests: async () => {}, clear: async () => {} }, searchSections: undefined, resolve: undefined } as unknown as ToolDeps;
 
 describe('P3 MCP surface', () => {
@@ -29,6 +32,12 @@ describe('P3 MCP surface', () => {
     expect(names.filter(name => legacy.has(name))).toHaveLength(6);
     expect(names).toEqual(expect.arrayContaining(['search_skill_sections', 'resolve_task_sections', 'get_token_savings_stats', 'doctor']));
     expect(names).toContain('discover_skill_folders');
+  });
+  it('recognizes every registered tool in the direct dispatcher', async () => {
+    for (const { name } of TOOL_DEFS) {
+      const response = await handleMcpToolCall(deps, name, {});
+      expect(response.content[0].text).not.toContain(`unknown tool: ${name}`);
+    }
   });
   it('validates actual payload boundaries', () => {
     expect(validateSearchSkillSectionsArgs({})).toMatchObject({ ok: false });
@@ -44,17 +53,34 @@ describe('P3 MCP surface', () => {
     expect(validateIndexSkillsArgs({ system: 'generic', roots: [] })).toMatchObject({ ok: false });
     expect(validateIndexSkillsArgs({ system: 'generic', roots: [''] })).toMatchObject({ ok: false });
     expect(validateIndexSkillsArgs({ system: 'generic', roots: ['/repo/skills'] })).toMatchObject({ ok: true });
+    expect(validateIndexSkillsArgs({ system: 'gemini' })).toMatchObject({ ok: true, value: { system: 'gemini' } });
+    expect(validateIndexSkillsArgs({ system: 'cursor' })).toMatchObject({ ok: true, value: { system: 'cursor' } });
+    expect(validateIndexSkillsArgs({ system: 'roo' })).toMatchObject({ ok: true, value: { system: 'roo' } });
+    expect(validateIndexSkillsArgs({ system: 'cline' })).toMatchObject({ ok: true, value: { system: 'cline' } });
     const indexDef = TOOL_DEFS.find(tool => tool.name === 'index_skills')!;
     const listDef = TOOL_DEFS.find(tool => tool.name === 'list_skills')!;
     expect((indexDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('generic');
     expect((listDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('generic');
+    expect((indexDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('gemini');
+    expect((listDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('gemini');
+    expect((indexDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('cursor');
+    expect((listDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('cursor');
+    expect((indexDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('roo');
+    expect((listDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('roo');
+    expect((indexDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('continue');
+    expect((listDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('continue');
+    expect((indexDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('cline');
+    expect((listDef.inputSchema.properties.system as { enum: string[] }).enum).toContain('cline');
+    expect(validateIndexSkillsArgs({ system: 'continue' })).toMatchObject({ ok: true });
+    expect(indexDef.description).toContain('discoveryDiagnostics');
+    expect(indexDef.description).toContain('diagnostics');
   });
 
   it('dispatches bounded candidate discovery without indexing', async () => {
     const project = mkdtempSync(join(tmpdir(), 'mcp-candidates-project-'));
     const home = mkdtempSync(join(tmpdir(), 'mcp-candidates-home-'));
     try {
-      mkdirSync(join(project, '.opencode', 'rules'), { recursive: true });
+      mkdirSync(join(project, '.opencode', 'skills'), { recursive: true });
       mkdirSync(join(home, '.claude', 'skills', 'demo'), { recursive: true });
       writeFileSync(join(home, '.claude', 'skills', 'demo', 'SKILL.md'), 'secret-skill-body');
       const toolDeps = { ...deps, resolveWorkspaceRoot: () => project, resolveHomeDir: () => home } as ToolDeps;
@@ -63,7 +89,7 @@ describe('P3 MCP surface', () => {
       const projectPayload = JSON.parse(response.content[0].text);
       expect(projectPayload).toMatchObject({
         scope: 'project', root: expect.any(String),
-        candidates: [expect.objectContaining({ path: '.opencode/rules', indexRoot: join(projectPayload.root, '.opencode', 'rules') })]
+        candidates: [expect.objectContaining({ path: '.opencode/skills', indexRoot: join(projectPayload.root, '.opencode', 'skills') })]
       });
       const homeResponse = await handleMcpToolCall(toolDeps, 'discover_skill_folders', { scope: 'home', limit: 1 });
       const homePayload = JSON.parse(homeResponse.content[0].text);
@@ -156,13 +182,15 @@ describe('P3 MCP surface', () => {
   it('counts each cross-skill manifest once and preserves the trust policy', async () => {
     const high = { ...sections[0], id: 'high::seed', manifestId: 'high-manifest', precedence: 100, requires: ['low::dep'] };
     const low = { ...sections[1], id: 'low::dep', manifestId: 'low-manifest', precedence: 5 };
-    const cross = { ...deps, resolve: () => ({ query: 'setup', seed: 'high::seed', collapsed: false, sections: [high, low].map((s, order) => ({ id: s.id, headingPath: [s.title], content: s.content, role: 'hard' as const, order, trustTier: 'project' })), leftovers: [], budget: { limit: 5000, used: 4 } }), store: { ...deps.store,
-      readIndex: async () => ({ 'high::seed': 'a', 'low::dep': 'b' }),
-      readSections: async (ids: string[]) => new Map([high, low].filter(s => ids.includes(s.id)).map(s => [s.id, s])) ,
-      readManifests: async () => ({
+    const crossFixture = materializeIndexFixture([high, low], {
         'high-manifest': { ...manifests['claude::a::hash']!, id: 'high-manifest', tokenCount: 20, sections: [] },
         'low-manifest': { ...manifests['claude::a::hash']!, id: 'low-manifest', tokenCount: 30, sections: [] }
-      })
+    });
+    fixtureCleanups.push(crossFixture.cleanup);
+    const cross = { ...deps, resolve: () => ({ query: 'setup', seed: 'high::seed', collapsed: false, sections: crossFixture.sections.map((s, order) => ({ id: s.id, headingPath: [s.title], content: s.content, role: 'hard' as const, order, trustTier: 'project' })), leftovers: [], budget: { limit: 5000, used: 4 } }), store: { ...deps.store,
+      readIndex: async () => ({ 'high::seed': 'a', 'low::dep': 'b' }),
+      readSections: async (ids: string[]) => new Map(crossFixture.sections.filter(s => ids.includes(s.id)).map(s => [s.id, s])) ,
+      readManifests: async () => crossFixture.manifests
     } } as unknown as ToolDeps;
     const result = JSON.parse(await handleResolveTaskSections(cross, 'setup', undefined, undefined, 5000));
     expect(result.tokenSavings.tokensWholeFile).toBe(50);
@@ -174,10 +202,12 @@ describe('P3 MCP surface', () => {
       { ...sections[0], id: 'collapse::one', manifestId: 'collapse-manifest', content: 'setup query now', tokenCount: 3 },
       { ...sections[1], id: 'collapse::two', manifestId: 'collapse-manifest', content: 'other', tokenCount: 1 }
     ];
+    const collapsedFixture = materializeIndexFixture(collapsed, { 'collapse-manifest': { ...manifests['claude::a::hash']!, id: 'collapse-manifest', tokenCount: 4 } });
+    fixtureCleanups.push(collapsedFixture.cleanup);
     const collapsedDeps = { ...deps, store: { ...deps.store,
-      readIndex: async () => Object.fromEntries(collapsed.map(s => [s.id, s.hash])),
-      readSections: async (ids: string[]) => new Map(collapsed.filter(s => ids.includes(s.id)).map(s => [s.id, s])),
-      readManifests: async () => ({ 'collapse-manifest': { ...manifests['claude::a::hash']!, id: 'collapse-manifest', tokenCount: 4 } })
+      readIndex: async () => Object.fromEntries(collapsedFixture.sections.map(s => [s.id, s.hash])),
+      readSections: async (ids: string[]) => new Map(collapsedFixture.sections.filter(s => ids.includes(s.id)).map(s => [s.id, s])),
+      readManifests: async () => collapsedFixture.manifests
     } } as unknown as ToolDeps;
     const result = JSON.parse(await handleResolveTaskSections(collapsedDeps, 'setup'));
     console.log(`synthetic-collapsed: count=1 savingsPct=${result.tokenSavings.savingsPct}%`);
@@ -212,10 +242,12 @@ describe('P3 MCP surface', () => {
       const id = `eval::${skill}::00000000`;
       evalManifests[id] = { ...manifests['claude::a::hash']!, id, skillName: skill, tokenCount: skillSections.reduce((n, s) => n + (s.tokenCount ?? 0), 0), sections: [], byteLength: 1 };
     }
+    const evalFixture = materializeIndexFixture(all, evalManifests);
+    fixtureCleanups.push(evalFixture.cleanup);
     const evalDeps = { ...deps, store: { ...deps.store,
-      readIndex: async () => Object.fromEntries(all.map(s => [s.id, s.hash])),
-      readSections: async (ids: string[]) => new Map(all.filter(s => ids.includes(s.id)).map(s => [s.id, s])),
-      readManifests: async () => evalManifests
+      readIndex: async () => Object.fromEntries(evalFixture.sections.map(s => [s.id, s.hash])),
+      readSections: async (ids: string[]) => new Map(evalFixture.sections.filter(s => ids.includes(s.id)).map(s => [s.id, s])),
+      readManifests: async () => evalFixture.manifests
     } } as unknown as ToolDeps;
     const rows: string[] = [];
     const savings: Array<{ tokensLoaded: number; tokensWholeFile: number | null; savingsPct: number | null; collapsed: boolean; multi: boolean }> = [];

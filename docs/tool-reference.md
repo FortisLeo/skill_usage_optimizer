@@ -3,12 +3,12 @@
 Ruleloom exposes MCP tools. Every tool takes a JSON object, returns a JSON string in the `content` array, and reports errors in the same shape:
 
 ```json
-{ "errors": ["system must be one of: claude, opencode, codex, copilot, generic"] }
+{ "errors": ["system must be one of: claude, opencode, codex, copilot, cursor, gemini, windsurf, cline, roo, continue, aider, generic"] }
 ```
 
 A successful call returns the documented payload. A failure returns `{ "errors": [...] }` and the MCP response sets `isError: true`.
 
-The `system` argument, when accepted, is one of: `claude`, `opencode`, `codex`, `copilot`, `generic`. Generic sources are indexed only from explicit roots.
+The `system` argument, when accepted, is one of: `claude`, `opencode`, `codex`, `copilot`, `cursor`, `gemini`, `windsurf`, `cline`, `roo`, `continue`, `aider`, `generic`. Generic sources are indexed only from explicit roots.
 
 ---
 
@@ -24,11 +24,11 @@ Opt-in candidate discovery only. With no arguments it recursively checks the ser
 | `maxDepth` | integer `0..10` | no | Directory traversal depth. Default: 5. |
 | `limit` | integer `1..500` | no | Candidate cap. Default: 100; `truncated` is true when reached. |
 
-Project roots include `.claude/skills`, `.claude/commands`, `.opencode/skills`, `.opencode/rules`, `.codex/skills`, `.codex/agents`, `.github/copilot`, and `.github/instructions`. Home roots include `.claude/skills`, `.opencode/skills`, `.config/opencode/skills`, `.codex/skills`, and `.github/copilot`. Project `AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` are also reported as non-indexable instruction files.
+Project and home candidates cover the documented roots for Claude, OpenCode, Codex, Copilot, Cursor, Gemini, Windsurf, Cline, Roo, and Continue, including compatible shared roots such as `.agents/skills`. Confirmed root instruction/configuration files are reported as non-indexable candidates. Aider has no candidate skill root: present `.aider.conf.yml` files are non-indexable configuration candidates, while configured `read:` files are handled by normal Aider indexing. Codex custom-agent TOML files are likewise handled by normal Codex adapter discovery.
 
 The bounded recursive walk additionally finds directories whose basename is exactly `skills`, using case-sensitive matching (`Skills` does not match), and exact `SKILL.md` or `skill.md` packages beneath them. Known roots keep their known system and are not duplicated as generic; unknown harness roots use `generic` with `matchedBy: "skills_directory"`. Discovery scans only the selected project/home tree, not arbitrary files, `/`, or the full machine. It skips `.git`, `node_modules`, `Library`, `Downloads`, `Trash`, `Caches`, `vendor`, `dist`, `build`, `target`, and symbolic links; real paths must remain inside the selected root. Defaults are depth 5, 100 results, and 10,000 scanned entries. `truncated` is true when the result or entry cap is reached.
 
-Every candidate has a valid `system` (`claude`, `opencode`, `codex`, `copilot`, or `generic`) and an `indexable` flag. Only indexable candidates have an absolute `indexRoot`: the parent directory for `skill_file`, or the matched directory for a folder candidate.
+Every candidate `system` comes from canonical `SOURCE_SYSTEMS` and has an `indexable` flag. Only indexable candidates have an absolute `indexRoot`: the parent directory for `skill_file`, or the matched directory for a folder candidate.
 
 ```json
 { "scope": "project", "root": "/repo", "candidates": [{ "path": ".claude/skills/example/SKILL.md", "system": "claude", "indexable": true, "indexRoot": "/repo/.claude/skills/example", "kind": "skill_file", "matchedBy": "SKILL.md" }], "truncated": false }
@@ -58,10 +58,10 @@ Discover, normalize, and compile rule files for one source system into the local
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot' \| 'generic'` | yes | Which system to index. |
+| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot' \| 'cursor' \| 'gemini' \| 'windsurf' \| 'cline' \| 'roo' \| 'continue' \| 'aider' \| 'generic'` | yes | Which system to index. |
 | `roots` | `string[]` | required for `generic` | Extra absolute paths to treat as rule roots for this system. Generic requires at least one explicit non-empty root and has no automatic roots. |
 | `baseDir` | `string` | no | Workspace root for discovery. Default: server's `cwd`. |
-| `force` | `boolean` | no | Wipe indexed skills for this system before indexing, while preserving local savings metrics. Default: false. |
+| `force` | `boolean` | no | Bypass record reuse and rewrite the requested system. A successful run has the same final live system slice as ordinary indexing; other systems and savings are preserved. Default: false. |
 
 ### Example input
 
@@ -97,7 +97,7 @@ Conflict keys are `"<system>::<skillName>"`. Manifest IDs are `"<system>::<skill
       "shadowed": [
         {
           "system": "opencode",
-          "sourcePath": "/Users/me/code/myproject/.opencode/rules/test-rules.md",
+          "sourcePath": "/Users/me/code/myproject/.opencode/skills/test-rules/SKILL.md",
           "sourceHash": "sha256:..."
         }
       ],
@@ -108,11 +108,12 @@ Conflict keys are `"<system>::<skillName>"`. Manifest IDs are `"<system>::<skill
 }
 ```
 
-When two sources for the same `<system>::<skillName>` live at the same precedence (e.g. both at `workspace_root`), the winner is picked by deterministic source-path order, then source-hash order. Pass `force: true` and re-snapshot a source if you need to flip a tie-break without moving files.
+When two sources for the same `<system>::<skillName>` live at the same precedence (e.g. both at `workspace_root`), the winner is picked by deterministic source-path order, then source-hash order. Force bypasses persisted-record reuse but does not change this selection.
 
 ### Notes
 
 - `indexedSkills` is the number of distinct manifests. `indexedSections` is the count of compiled section records.
+- Ordinary and forced successful indexing both prune requested-system records whose roots disappeared. Neither mode performs global or source-root physical cleanup.
 - `errors` is empty on success. Non-empty means discovery, normalization, or compilation hit a hard failure (unreadable file, parse error, unsafe path). Conflicts do not appear here. They live in `diagnostics`.
 - `diagnostics` lists precedence conflicts. The winner is the source actually applied. The shadowed entries are still on disk but were suppressed.
 
@@ -126,7 +127,7 @@ Enumerate every indexed skill, with summary metadata and conflict counts. No arg
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot' \| 'generic'` | no | Restrict the list to one system. |
+| `system` | `'claude' \| 'opencode' \| 'codex' \| 'copilot' \| 'cursor' \| 'gemini' \| 'windsurf' \| 'cline' \| 'roo' \| 'continue' \| 'aider' \| 'generic'` | no | Restrict the list to one system. |
 
 ### Example input
 
@@ -163,7 +164,7 @@ If any indexed section's source file has changed on disk since the last `index_s
 
 ```json
 {
-  "errors": ["section \"claude::test-rules::abcd1234::setup\" source changed; rerun index_skills"],
+  "freshness": "stale",
   "rebuildRequired": {
     "code": "REBUILD_REQUIRED",
     "action": "index_skills",
@@ -174,7 +175,7 @@ If any indexed section's source file has changed on disk since the last `index_s
 }
 ```
 
-If you see this, call `index_skills` (with `force: true` if the change is structural) and retry.
+Source bytes are read only through the bounded, root-contained, symlink-rejecting freshness reader to verify the persisted hash; they are never returned from a stale response. Identifier lists are bounded. Call `index_skills` (with `force: true` only to bypass reuse) and retry.
 
 ---
 
@@ -481,7 +482,7 @@ The MCP response is `isError: true` in that case. The harness usually surfaces t
 }
 ```
 
-If you see this, the right move is to call `index_skills` (with `force: true` if you want a clean slate) and retry. Don't try to work around it by reading the cache directly. Ruleloom is refusing on purpose: the on-disk content no longer matches what was compiled.
+If you see this, call `index_skills` and retry; use `force: true` only to bypass reuse and rewrite the requested system. Don't try to work around it by reading the cache directly. Ruleloom is refusing on purpose: the on-disk content no longer matches what was compiled.
 
 ### Conflict diagnostic envelope
 

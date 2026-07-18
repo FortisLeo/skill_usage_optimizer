@@ -72,13 +72,102 @@ You get back a `context` string plus a `sections` array, with `omitted` entries 
 | --- | --- | --- |
 | Claude Code (CLI) | Supported | stdio, register in `claude_desktop_config.json` or project `.mcp.json` |
 | Claude Desktop | Supported | stdio |
-| OpenCode | Supported | register in `opencode.json` or `.opencode/config.json` |
+| OpenCode | Supported | register in project or global `opencode.json` |
 | Codex CLI | Supported | stdio via `codex mcp` |
 | VS Code + Copilot | Supported | stdio, register in `.vscode/mcp.json` or user `mcp.json` |
-| Cursor | Supported | generic stdio MCP |
+| Gemini CLI | Supported | stdio MCP; dedicated `gemini` indexing adapter |
+| Cursor | Supported | stdio MCP; dedicated `cursor` indexing adapter |
+| Devin Desktop (formerly Windsurf) | Supported | stdio MCP; dedicated `windsurf` rules adapter for the current latest-release contract |
+| Cline | Supported | stdio MCP; dedicated `cline` rules/config adapter for Cline 4.0.8 and CLI 3.0.40 |
+| Roo Code | Supported | stdio MCP; dedicated `roo` indexing adapter for final v3.54.0 filesystem contracts |
+| Continue | Supported | stdio MCP; dedicated `continue` workspace-rules/config adapter for v2.0.0-vscode |
+| Aider | Supported | stdio MCP; dedicated `aider` adapter for v0.86.0 `.aider.conf.yml` `read` entries |
 | Generic MCP client | Supported | anything that speaks MCP over stdio |
 
 Ruleloom has no network dependencies. It reads from local files, writes a local cache, and never phones home.
+
+Claude Code indexing covers documented project, nested, and user skills,
+legacy commands, rules, and `CLAUDE.md` instruction files. It does not crawl
+plugin caches or reconstruct runtime-effective plugin sources; use explicit
+`index_skills.roots` for trusted sources outside the documented roots.
+
+OpenCode indexing covers documented project/global `.opencode`, `.agents`, and
+Claude-compatible skill roots plus `AGENTS.md`/`CLAUDE.md` fallback files. It
+does not crawl OpenCode caches or `node_modules`, resolve configured instruction
+globs, or claim runtime-effective plugin paths. When those paths are unavailable,
+`discoveryDiagnostics` points to explicit `index_skills.roots` as the fallback.
+
+Codex CLI indexing covers the documented `AGENTS.override.md`/`AGENTS.md`
+hierarchy, repository and user `.agents/skills`, and repository/user custom
+agents under `.codex/agents`. Unix admin skills under `/etc/codex/skills` remain
+opt-in. Ruleloom does not resolve configured fallback names, alternate
+`CODEX_HOME`, bundled/plugin/runtime-effective sources, or crawl caches; use
+trusted explicit `index_skills.roots` when needed.
+
+GitHub Copilot/VS Code indexing covers repository instructions, path-specific
+instructions, root `AGENTS.md`/Claude-compatible instructions, documented
+project/personal skills, prompts, and custom agents. It preserves `applyTo` and
+Claude `paths` metadata but cannot apply those globs without a target file. VS
+Code profile user data, configured extra locations, organization/extension
+sources, nested experimental `AGENTS.md`, and runtime-applied diagnostics are
+not crawled; use trusted explicit `index_skills.roots` for readable sources.
+
+Gemini CLI indexing covers documented workspace/user `.gemini/skills` and
+`.agents/skills`, the supplied `GEMINI.md` hierarchy, and direct installed
+extension `skills/` roots under `~/.gemini/extensions`. It preserves Gemini's
+workspace/user/extension and `.agents` alias precedence without crawling caches
+or package trees. Built-ins, linked/disabled/runtime state, custom context file
+names, imports, and JIT context are not reconstructed; use trusted explicit
+`index_skills.roots` for readable sources outside the documented roots.
+
+Cursor indexing covers recursive project `.cursor/rules/**/*.mdc`, root
+`AGENTS.md`/`CLAUDE.md`, legacy `.cursorrules`, and documented project/user
+`.cursor`, `.agents`, Claude-compatible, and Codex-compatible skill roots. It
+preserves rule and skill frontmatter during normalization but does not evaluate
+path applicability or reconstruct final rule ordering/effective prompts. User
+and team rules, commands, plugins, settings state, and runtime context have no
+stable readable contract in current official docs; use trusted explicit
+`index_skills.roots` for readable sources outside the confirmed roots.
+
+Windsurf indexing targets current Devin Desktop: preferred workspace
+`.devin/rules`, documented fallback `.windsurf/rules` and `.windsurfrules`, the
+workspace `AGENTS.md` hierarchy, and the still-current global rule at
+`~/.codeium/windsurf/memories/global_rules.md`. It does not crawl other memories,
+private/cache state, enterprise system rules, activation state, or final prompts;
+use trusted explicit `index_skills.roots` for readable unsupported sources.
+
+Cline indexing covers workspace `.clinerules` files/directories, current
+`.cline/rules`, documented compatibility instructions, and current/legacy skill
+roots. With global discovery enabled it also reads documented `~/.cline` and
+`~/Documents/Cline` rule/skill locations plus `~/.agents/AGENTS.md`. It does not
+read settings, secrets, rule toggles, remote rules, active Plan/Act state,
+custom data directories, private extension storage, or runtime-effective
+prompts; pass trusted alternate roots through `index_skills.roots`.
+
+Roo Code indexing covers global/workspace `.roo/rules`, all discovered
+`.roo/rules-{mode}` directories, documented `.roo`/`.agents` generic and
+mode-specific skill roots, `.roorules` fallbacks, and root `AGENTS.md` or
+`AGENT.md`. It reads only the stable `roo-cline.useAgentRules` boolean from
+standard VS Code user/workspace settings; it does not infer the active mode,
+read private extension state, or reconstruct UI instructions or final prompts.
+Use trusted explicit `index_skills.roots` for other readable sources.
+
+Continue indexing covers workspace `.continue/rules/*.md` files (including
+their YAML frontmatter) and local Markdown rule/prompt files referenced with
+canonical `file://` URLs by the active `~/.continue/config.yaml` (or deprecated
+`config.json` fallback). Inline and remote config entries, user rules without a
+documented readable path, Hub blocks, toolbar selection, and composed/final
+system messages are not reconstructed. Use trusted explicit
+`index_skills.roots` for other readable local sources.
+
+Aider has no native skills directory. Aider indexing reads only bounded regular
+files explicitly listed by `read:` in supported `.aider.conf.yml` files from the
+supplied home, repository, and workspace/current-directory locations, preserving
+that documented precedence. It does not infer `CONVENTIONS.md` or other filenames,
+inspect session `/read` state or unavailable CLI arguments, follow directories or
+symlinks, select alternate `--config` files, or reconstruct runtime/final prompts.
+Use trusted explicit `index_skills.roots` for readable sources unavailable through
+the supported config locations.
 
 ## MCP tools
 
@@ -108,6 +197,8 @@ Ruleloom exposes MCP tools. Names are stable. Schemas are JSON Schema over the M
 | `get_token_savings_stats` | Return active-session and lifetime estimated token proxy totals. |
 
 `discover_skill_folders` never runs automatically, reads no skill content, and never indexes or compiles. An explicit call recursively checks only the project root by default, or the home directory only with `{ "scope": "home" }`. It finds supported canonical roots plus directories whose basename is exactly lowercase `skills` (case-sensitive), then reports exact `SKILL.md` or `skill.md` packages beneath them. It does not inspect arbitrary files, accept a custom discovery root, scan `/`, or crawl the full machine. Traversal skips common generated/private directories and symlinks and is bounded by depth, result, and scan-entry caps.
+
+Candidate `system` values use the canonical `SOURCE_SYSTEMS` list. A supported system may have no indexable candidate root: Aider, for example, reports only a non-indexable `.aider.conf.yml` candidate and is indexed through its configured `read:` files or explicit roots.
 Use `indexRoot` and `system` only when `indexable` is true. Known roots retain their harness system; unknown `skills` folders use `generic`. `indexRoot` is an absolute directory, including for `scope: "home"`; do not pass `candidate.path`, which is display-only and may name a file. Generic indexing is always explicit:
 
 ```json
